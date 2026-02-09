@@ -30,6 +30,14 @@ const CODEX_MODEL = process.env.CODEX_MODEL || "";
 const CODEX_FULL_ACCESS = (process.env.CODEX_FULL_ACCESS || "true").toLowerCase() === "true";
 const CODEX_SANDBOX = process.env.CODEX_SANDBOX || "danger-full-access";
 const AUTONOMOUS_V3_ENABLED = (process.env.AUTONOMOUS_V3_ENABLED || "true").toLowerCase() !== "false";
+const BACKGROUND_TASK_LOOP_MS = Math.max(
+  1000,
+  parseInt(process.env.BACKGROUND_TASK_LOOP_MS || "5000", 10) || 5000
+);
+const BACKGROUND_TASK_MAX_ATTEMPTS = Math.max(
+  1,
+  parseInt(process.env.BACKGROUND_TASK_MAX_ATTEMPTS || "2", 10) || 2
+);
 
 const WORKSPACE_PATHS = resolveWorkspacePaths();
 const WORKSPACE_DIR = WORKSPACE_PATHS.workspaceDir;
@@ -73,11 +81,34 @@ interface CodexEvent {
   };
 }
 
+interface RouteDecision {
+  route: "direct" | "background";
+  reason: string;
+}
+
+interface BackgroundTask {
+  id: string;
+  status: "pending" | "running" | "done" | "failed";
+  created_at: string;
+  updated_at: string;
+  started_at?: string;
+  finished_at?: string;
+  request_text: string;
+  chat_id: number | string;
+  requester_user_id?: string;
+  attempts: number;
+  max_attempts: number;
+  last_error?: string;
+  route_reason: string;
+}
+
 const LOCK_FILE = join(WORKSPACE_DIR, "bot.lock");
 let session: SessionState = { sessionId: null, lastActivity: new Date().toISOString() };
 let promptLoadWarningShown = false;
 let voiceRelayServer: Bun.Server | null = null;
 let maintenanceTimer: ReturnType<typeof setInterval> | null = null;
+let backgroundTaskTimer: ReturnType<typeof setInterval> | null = null;
+let backgroundWorkerRunning = false;
 
 // ============================================================
 // SESSION MANAGEMENT
@@ -140,6 +171,7 @@ function setupSignalHandlers(): void {
 
   process.on("SIGINT", async () => {
     maintenanceTimer && clearInterval(maintenanceTimer);
+    backgroundTaskTimer && clearInterval(backgroundTaskTimer);
     voiceRelayServer?.stop(true);
     await releaseLock();
     process.exit(0);
@@ -147,6 +179,7 @@ function setupSignalHandlers(): void {
 
   process.on("SIGTERM", async () => {
     maintenanceTimer && clearInterval(maintenanceTimer);
+    backgroundTaskTimer && clearInterval(backgroundTaskTimer);
     voiceRelayServer?.stop(true);
     await releaseLock();
     process.exit(0);
@@ -255,23 +288,78 @@ function parseCodexOutput(output: string): { response: string; sessionId: string
 // ASSISTANT FLOW
 // ============================================================
 
-async function generateAssistantResponse(userMessage: string): Promise<string> {
-  const policyPrompt = await buildPolicyPrompt(userMessage);
-
-  // Fast-path small talk so simple greetings do not trigger task-graph orchestration.
-  if (isSmallTalkMessage(userMessage)) {
-    return callCodex(policyPrompt, { resume: true });
+function parseJsonObject<T>(input: string): T | null {
+  try {
+    return JSON.parse(input) as T;
+  } catch {
+    // Keep trying with extracted object bounds.
   }
 
+  const first = input.indexOf("{");
+  const last = input.lastIndexOf("}");
+  if (first === -1 || last === -1 || last <= first) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(input.slice(first, last + 1)) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function classifyRequestRouteWithLlm(userMessage: string): Promise<RouteDecision> {
   if (!AUTONOMOUS_V3_ENABLED) {
-    const enrichedPrompt = await buildPromptWithMemory(userMessage, policyPrompt);
-    return callCodex(enrichedPrompt, { resume: true });
+    return { route: "direct", reason: "Autonomous background mode is disabled." };
   }
 
-  const result = await runAutonomousV3(userMessage, WORKSPACE_PATHS, {
-    callCodex,
-  });
-  return result.response;
+  if (isSmallTalkMessage(userMessage)) {
+    return { route: "direct", reason: "Small-talk shortcut." };
+  }
+
+  const prompt = [
+    "Role: Request Router.",
+    "Decide whether a user request should run directly now or go to background autonomous cycle.",
+    "Return strict JSON only. No markdown.",
+    "Schema:",
+    '{ "route": "direct|background", "reason": "short string" }',
+    "Routing rules:",
+    "- Use direct for quick factual Q&A, time/date/weather, brief chat, simple clarifications.",
+    "- Use background for multi-step tasks, coding/build/fix work, research with evidence, file changes, or scheduled/deferred actions.",
+    "- If uncertain, prefer direct.",
+    `User request: ${userMessage}`,
+  ].join("\n");
+
+  const raw = await callCodex(prompt, { resume: false });
+  const parsed = parseJsonObject<Partial<RouteDecision>>(raw);
+
+  if (parsed?.route === "background") {
+    return {
+      route: "background",
+      reason: typeof parsed.reason === "string" && parsed.reason.trim() ? parsed.reason.trim() : "LLM chose background.",
+    };
+  }
+
+  if (parsed?.route === "direct") {
+    return {
+      route: "direct",
+      reason: typeof parsed.reason === "string" && parsed.reason.trim() ? parsed.reason.trim() : "LLM chose direct.",
+    };
+  }
+
+  // Fallback rule when classification output is invalid.
+  const normalized = userMessage.trim().toLowerCase();
+  if (/(in\s+\d+\s+(minute|minutes|hour|hours)|\b(at|tomorrow|later|schedule|remind)\b)/i.test(normalized)) {
+    return { route: "background", reason: "Fallback: deferred/scheduling language detected." };
+  }
+
+  return { route: "direct", reason: "Fallback: invalid classifier output." };
+}
+
+async function generateDirectAssistantResponse(userMessage: string): Promise<string> {
+  const policyPrompt = await buildPolicyPrompt(userMessage);
+  const enrichedPrompt = await buildPromptWithMemory(userMessage, policyPrompt);
+  return callCodex(enrichedPrompt, { resume: true });
 }
 
 // ============================================================
@@ -342,6 +430,129 @@ function isSmallTalkMessage(userMessage: string): boolean {
   const hasQuestion = normalized.includes("?");
 
   return words.length <= 3 && !hasActionSignals && !hasQuestion;
+}
+
+function wantsInternalExecutionDetails(userMessage: string): boolean {
+  const normalized = userMessage.trim().toLowerCase();
+  if (!normalized) return false;
+  return /(\b(show|give|include|share|explain)\b.*\b(details?|steps?|process|internal|under the hood|how)\b)|(\bhow did you\b)|(\bwhat did you do\b)|(\btask graph\b)|(\brun ledger\b)|(\bdebug\b)/i.test(
+    normalized
+  );
+}
+
+function cleanUserFacingText(text: string): string {
+  return text
+    .replace(/^completed:\s*/i, "")
+    .replace(/^blocked:\s*/i, "")
+    .replace(/^\s*-\s+/gm, "")
+    .trim();
+}
+
+function formatAutonomousResultForUser(
+  result: Awaited<ReturnType<typeof runAutonomousV3>>
+): string {
+  const doneNodes = result.graph.nodes.filter(
+    (node) => node.status === "done" && typeof node.result_summary === "string" && node.result_summary.trim()
+  );
+  const blockedNode =
+    result.graph.nodes.find((node) => node.status === "blocked") ||
+    result.graph.nodes.find((node) => node.status === "failed");
+
+  if (result.graph.status === "done" && doneNodes.length > 0) {
+    const preferred =
+      doneNodes.find((node) =>
+        /(summary|answer|response|final|report|result|forecast)/i.test(node.title)
+      ) || doneNodes[doneNodes.length - 1];
+    const summary = cleanUserFacingText(preferred.result_summary || "");
+    if (summary) return summary;
+  }
+
+  if (blockedNode) {
+    const issue = cleanUserFacingText(
+      blockedNode.critic_issues?.[0] || blockedNode.result_summary || "I hit a blocker while completing that."
+    );
+    return `I couldn't complete that fully: ${issue}`;
+  }
+
+  const fallback = cleanUserFacingText(result.response);
+  if (fallback) return fallback;
+  return "I couldn't produce a final answer for that yet.";
+}
+
+async function loadBackgroundTasks(): Promise<BackgroundTask[]> {
+  try {
+    const content = await readFile(WORKSPACE_PATHS.backgroundTasksFile, "utf-8");
+    const parsed = JSON.parse(content) as BackgroundTask[];
+    if (Array.isArray(parsed)) return parsed;
+  } catch {
+    // Fall back to empty queue.
+  }
+  return [];
+}
+
+async function saveBackgroundTasks(tasks: BackgroundTask[]): Promise<void> {
+  await writeFile(WORKSPACE_PATHS.backgroundTasksFile, `${JSON.stringify(tasks, null, 2)}\n`, "utf-8");
+}
+
+function buildBackgroundTaskId(): string {
+  return `bg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function enqueueBackgroundTask(input: {
+  requestText: string;
+  chatId: number | string;
+  requesterUserId?: string;
+  routeReason: string;
+}): Promise<BackgroundTask> {
+  const now = new Date().toISOString();
+  const task: BackgroundTask = {
+    id: buildBackgroundTaskId(),
+    status: "pending",
+    created_at: now,
+    updated_at: now,
+    request_text: input.requestText,
+    chat_id: input.chatId,
+    requester_user_id: input.requesterUserId,
+    attempts: 0,
+    max_attempts: BACKGROUND_TASK_MAX_ATTEMPTS,
+    route_reason: input.routeReason,
+  };
+
+  const queue = await loadBackgroundTasks();
+  queue.push(task);
+  await saveBackgroundTasks(queue);
+  return task;
+}
+
+async function updateBackgroundTask(
+  taskId: string,
+  update: (task: BackgroundTask) => BackgroundTask
+): Promise<BackgroundTask | null> {
+  const queue = await loadBackgroundTasks();
+  const index = queue.findIndex((task) => task.id === taskId);
+  if (index === -1) return null;
+  const next = update(queue[index]);
+  queue[index] = next;
+  await saveBackgroundTasks(queue);
+  return next;
+}
+
+async function claimNextBackgroundTask(): Promise<BackgroundTask | null> {
+  const queue = await loadBackgroundTasks();
+  const next = queue.find(
+    (task) =>
+      (task.status === "pending" || task.status === "failed") &&
+      task.attempts < Math.max(1, task.max_attempts)
+  );
+  if (!next) return null;
+
+  const now = new Date().toISOString();
+  next.status = "running";
+  next.updated_at = now;
+  next.started_at = now;
+  next.attempts += 1;
+  await saveBackgroundTasks(queue);
+  return next;
 }
 
 function getDateStamp(timezone: string): string {
@@ -547,7 +758,7 @@ async function sendResponse(ctx: Context, response: string): Promise<void> {
   const MAX_LENGTH = 4000;
 
   if (response.length <= MAX_LENGTH) {
-    await ctx.reply(response);
+    await sendTelegramFormattedMessage(ctx, response);
     return;
   }
 
@@ -570,17 +781,268 @@ async function sendResponse(ctx: Context, response: string): Promise<void> {
   }
 
   for (const chunk of chunks) {
-    await ctx.reply(chunk);
+    await sendTelegramFormattedMessage(ctx, chunk);
   }
 }
 
-async function handleUserMessage(ctx: Context, userText: string, memoryLabel = userText): Promise<void> {
-  await ctx.replyWithChatAction("typing");
+function escapeMarkdownV2Text(input: string): string {
+  return input.replace(/([_*\[\]()~`>#+\-=|{}.!\\])/g, "\\$1");
+}
 
-  const response = await generateAssistantResponse(userText);
-  await appendMemoryEntry("user", memoryLabel);
-  await appendMemoryEntry("assistant", response);
-  await sendResponse(ctx, response);
+function escapeMarkdownV2Code(input: string): string {
+  return input.replace(/([`\\])/g, "\\$1");
+}
+
+function escapeMarkdownV2Link(input: string): string {
+  return input.replace(/([)\\])/g, "\\$1");
+}
+
+function transformInlineMarkdownToTelegram(input: string): string {
+  const placeholders: string[] = [];
+  const put = (value: string): string => {
+    const token = `@@TGMDBLOCK${placeholders.length}@@`;
+    placeholders.push(value);
+    return token;
+  };
+
+  let working = input;
+
+  // Inline code
+  working = working.replace(/`([^`\n]+)`/g, (_match, code) => {
+    return put(`\`${escapeMarkdownV2Code(code)}\``);
+  });
+
+  // Links [text](url)
+  working = working.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_match, label, url) => {
+    return put(`[${escapeMarkdownV2Text(label)}](${escapeMarkdownV2Link(url)})`);
+  });
+
+  // Bold **text**
+  working = working.replace(/\*\*([^*\n]+)\*\*/g, (_match, value) => {
+    return put(`*${escapeMarkdownV2Text(value)}*`);
+  });
+
+  // Italic *text*
+  working = working.replace(/(^|[\s(])\*([^*\n]+)\*(?=$|[\s).,!?:;])/g, (_match, prefix, value) => {
+    return `${prefix}${put(`_${escapeMarkdownV2Text(value)}_`)}`;
+  });
+
+  // Escape rest
+  working = escapeMarkdownV2Text(working);
+
+  // Restore placeholders
+  return working.replace(/@@TGMDBLOCK(\d+)@@/g, (_match, i) => placeholders[Number(i)] || "");
+}
+
+function formatMarkdownForTelegram(input: string): string {
+  const normalized = input.replace(/\r\n/g, "\n");
+  const codePlaceholders: string[] = [];
+  const putCode = (value: string): string => {
+    const token = `@@TGCODEBLOCK${codePlaceholders.length}@@`;
+    codePlaceholders.push(value);
+    return token;
+  };
+
+  // Preserve fenced code blocks first
+  let working = normalized.replace(/```([a-zA-Z0-9_-]+)?\n?([\s\S]*?)```/g, (_match, lang, code) => {
+    const safeLang = (lang || "").replace(/[^a-zA-Z0-9_-]/g, "");
+    const safeCode = escapeMarkdownV2Code(String(code).replace(/\n+$/g, ""));
+    const block = safeLang ? `\`\`\`${safeLang}\n${safeCode}\n\`\`\`` : `\`\`\`\n${safeCode}\n\`\`\``;
+    return putCode(block);
+  });
+
+  const lines = working.split("\n").map((line) => {
+    const heading = line.match(/^#{1,6}\s+(.+)$/);
+    if (heading) {
+      return `*${escapeMarkdownV2Text(heading[1].trim())}*`;
+    }
+
+    const unordered = line.match(/^\s*[-*]\s+(.+)$/);
+    if (unordered) {
+      return `• ${transformInlineMarkdownToTelegram(unordered[1].trim())}`;
+    }
+
+    const ordered = line.match(/^\s*(\d+)\.\s+(.+)$/);
+    if (ordered) {
+      return `${ordered[1]}\\. ${transformInlineMarkdownToTelegram(ordered[2].trim())}`;
+    }
+
+    if (!line.trim()) return "";
+    return transformInlineMarkdownToTelegram(line);
+  });
+
+  working = lines.join("\n");
+  return working.replace(/@@TGCODEBLOCK(\d+)@@/g, (_match, i) => codePlaceholders[Number(i)] || "");
+}
+
+async function sendTelegramFormattedTextToChat(
+  api: Context["api"],
+  chatId: number | string,
+  text: string
+): Promise<void> {
+  const formatted = formatMarkdownForTelegram(text);
+  try {
+    await api.sendMessage(chatId, formatted, {
+      parse_mode: "MarkdownV2",
+      link_preview_options: {
+        is_disabled: true,
+      },
+    });
+  } catch (error) {
+    console.warn("MarkdownV2 formatting failed, sending plain text fallback:", error);
+    await api.sendMessage(chatId, text, {
+      link_preview_options: {
+        is_disabled: true,
+      },
+    });
+  }
+}
+
+async function sendTelegramFormattedMessage(ctx: Context, text: string): Promise<void> {
+  const chatId = ctx.chat?.id;
+  if (!chatId) {
+    await ctx.reply(text);
+    return;
+  }
+  await sendTelegramFormattedTextToChat(ctx.api, chatId, text);
+}
+
+async function runWithTypingIndicator<T>(ctx: Context, task: () => Promise<T>): Promise<T> {
+  await ctx.replyWithChatAction("typing");
+  const pulse = setInterval(() => {
+    ctx.replyWithChatAction("typing").catch(() => {});
+  }, 4500);
+
+  try {
+    return await task();
+  } finally {
+    clearInterval(pulse);
+  }
+}
+
+function buildBackgroundQueuedAck(task: BackgroundTask): string {
+  return [
+    "Queued.",
+    "I will run this in the background and send the result here.",
+    `Task ID: ${task.id}`,
+  ].join("\n");
+}
+
+function buildBackgroundCompletionMessage(task: BackgroundTask, resultText: string): string {
+  const summary = resultText.trim() || "Completed.";
+  return [
+    `Background task complete (${task.id}):`,
+    "",
+    summary,
+  ].join("\n");
+}
+
+function buildBackgroundFailureMessage(task: BackgroundTask, errorText: string): string {
+  return [
+    `Background task failed (${task.id}).`,
+    "",
+    errorText.trim() || "Unknown failure.",
+  ].join("\n");
+}
+
+async function processNextBackgroundTask(api: Context["api"]): Promise<void> {
+  if (backgroundWorkerRunning) return;
+  backgroundWorkerRunning = true;
+
+  try {
+    const task = await claimNextBackgroundTask();
+    if (!task) return;
+
+    try {
+      const result = await runAutonomousV3(task.request_text, WORKSPACE_PATHS, {
+        callCodex,
+      });
+      const output = formatAutonomousResultForUser(result);
+      const completionMessage = buildBackgroundCompletionMessage(task, output);
+      await sendTelegramFormattedTextToChat(api, task.chat_id, completionMessage);
+      await appendMemoryEntry("assistant", `[Background ${task.id}] ${output}`);
+
+      await updateBackgroundTask(task.id, (current) => ({
+        ...current,
+        status: "done",
+        updated_at: new Date().toISOString(),
+        finished_at: new Date().toISOString(),
+        last_error: undefined,
+      }));
+    } catch (error) {
+      const message = String(error);
+      const willRetry = task.attempts < task.max_attempts;
+
+      await updateBackgroundTask(task.id, (current) => ({
+        ...current,
+        status: willRetry ? "failed" : "failed",
+        updated_at: new Date().toISOString(),
+        finished_at: willRetry ? undefined : new Date().toISOString(),
+        last_error: message,
+      }));
+
+      if (!willRetry) {
+        await sendTelegramFormattedTextToChat(
+          api,
+          task.chat_id,
+          buildBackgroundFailureMessage(task, message)
+        );
+      }
+    }
+  } finally {
+    backgroundWorkerRunning = false;
+  }
+}
+
+function startBackgroundTaskLoop(api: Context["api"]): void {
+  console.log(`Background task loop: enabled (every ${BACKGROUND_TASK_LOOP_MS}ms)`);
+  processNextBackgroundTask(api).catch((error) => {
+    console.error("Background task iteration failed:", error);
+  });
+
+  backgroundTaskTimer = setInterval(() => {
+    processNextBackgroundTask(api).catch((error) => {
+      console.error("Background task iteration failed:", error);
+    });
+  }, BACKGROUND_TASK_LOOP_MS);
+}
+
+async function handleUserMessage(
+  ctx: Context,
+  userText: string,
+  memoryLabel = userText,
+  options?: { typingManagedExternally?: boolean }
+): Promise<void> {
+  const run = async () => {
+    const routeDecision = await classifyRequestRouteWithLlm(userText);
+    const chatId = ctx.chat?.id;
+
+    await appendMemoryEntry("user", memoryLabel);
+
+    if (routeDecision.route === "background" && chatId) {
+      const task = await enqueueBackgroundTask({
+        requestText: userText,
+        chatId,
+        requesterUserId: ctx.from?.id?.toString(),
+        routeReason: routeDecision.reason,
+      });
+      const ack = buildBackgroundQueuedAck(task);
+      await appendMemoryEntry("assistant", ack);
+      await sendTelegramFormattedMessage(ctx, ack);
+      return;
+    }
+
+    const response = await generateDirectAssistantResponse(userText);
+    await appendMemoryEntry("assistant", response);
+    await sendResponse(ctx, response);
+  };
+
+  if (options?.typingManagedExternally) {
+    await run();
+    return;
+  }
+
+  await runWithTypingIndicator(ctx, run);
 }
 
 function registerBotHandlers(bot: Bot): void {
@@ -603,29 +1065,35 @@ function registerBotHandlers(bot: Bot): void {
 
   bot.on("message:voice", async (ctx) => {
     console.log("Voice message received");
-    await ctx.replyWithChatAction("typing");
 
     let filePath = "";
     let transcriptionPath = "";
 
     try {
-      const voice = ctx.message.voice;
-      const file = await ctx.api.getFile(voice.file_id);
-      const timestamp = Date.now();
-      filePath = join(UPLOADS_DIR, `voice_${timestamp}.ogg`);
+      await runWithTypingIndicator(ctx, async () => {
+        const voice = ctx.message.voice;
+        const file = await ctx.api.getFile(voice.file_id);
+        const timestamp = Date.now();
+        filePath = join(UPLOADS_DIR, `voice_${timestamp}.ogg`);
 
-      const response = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`);
-      const buffer = await response.arrayBuffer();
-      await writeFile(filePath, Buffer.from(buffer));
+        const response = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`);
+        const buffer = await response.arrayBuffer();
+        await writeFile(filePath, Buffer.from(buffer));
 
-      transcriptionPath = await prepareAudioForWhisper(filePath);
-      const transcription = await transcribeWithLocalWhisper(transcriptionPath);
-      if (!transcription) {
-        await ctx.reply("I could not transcribe that voice message.");
-        return;
-      }
+        transcriptionPath = await prepareAudioForWhisper(filePath);
+        const transcription = await transcribeWithLocalWhisper(transcriptionPath);
+        if (!transcription) {
+          await ctx.reply("I could not transcribe that voice message.");
+          return;
+        }
 
-      await handleUserMessage(ctx, `[Voice transcription]\n${transcription}`, `[Voice] ${transcription}`);
+        await handleUserMessage(
+          ctx,
+          `[Voice transcription]\n${transcription}`,
+          `[Voice] ${transcription}`,
+          { typingManagedExternally: true }
+        );
+      });
     } catch (error) {
       console.error("Voice error:", error);
       await ctx.reply("Voice transcription failed. Check WHISPER_CLI_PATH and WHISPER_MODEL_PATH.");
@@ -643,22 +1111,28 @@ function registerBotHandlers(bot: Bot): void {
 
   bot.on("message:photo", async (ctx) => {
     console.log("Image received");
-    await ctx.replyWithChatAction("typing");
 
     let filePath = "";
     try {
-      const photos = ctx.message.photo;
-      const photo = photos[photos.length - 1];
-      const file = await ctx.api.getFile(photo.file_id);
-      const timestamp = Date.now();
-      filePath = join(UPLOADS_DIR, `image_${timestamp}.jpg`);
+      await runWithTypingIndicator(ctx, async () => {
+        const photos = ctx.message.photo;
+        const photo = photos[photos.length - 1];
+        const file = await ctx.api.getFile(photo.file_id);
+        const timestamp = Date.now();
+        filePath = join(UPLOADS_DIR, `image_${timestamp}.jpg`);
 
-      const response = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`);
-      const buffer = await response.arrayBuffer();
-      await writeFile(filePath, Buffer.from(buffer));
+        const response = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`);
+        const buffer = await response.arrayBuffer();
+        await writeFile(filePath, Buffer.from(buffer));
 
-      const caption = ctx.message.caption || "Analyze this image.";
-      await handleUserMessage(ctx, `[Image: ${filePath}]\n\n${caption}`, `[Image] ${caption}`);
+        const caption = ctx.message.caption || "Analyze this image.";
+        await handleUserMessage(
+          ctx,
+          `[Image: ${filePath}]\n\n${caption}`,
+          `[Image] ${caption}`,
+          { typingManagedExternally: true }
+        );
+      });
     } catch (error) {
       console.error("Image error:", error);
       await ctx.reply("Could not process image.");
@@ -672,21 +1146,27 @@ function registerBotHandlers(bot: Bot): void {
   bot.on("message:document", async (ctx) => {
     const doc = ctx.message.document;
     console.log(`Document: ${doc.file_name}`);
-    await ctx.replyWithChatAction("typing");
 
     let filePath = "";
     try {
-      const file = await ctx.getFile();
-      const timestamp = Date.now();
-      const fileName = doc.file_name || `file_${timestamp}`;
-      filePath = join(UPLOADS_DIR, `${timestamp}_${fileName}`);
+      await runWithTypingIndicator(ctx, async () => {
+        const file = await ctx.getFile();
+        const timestamp = Date.now();
+        const fileName = doc.file_name || `file_${timestamp}`;
+        filePath = join(UPLOADS_DIR, `${timestamp}_${fileName}`);
 
-      const response = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`);
-      const buffer = await response.arrayBuffer();
-      await writeFile(filePath, Buffer.from(buffer));
+        const response = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`);
+        const buffer = await response.arrayBuffer();
+        await writeFile(filePath, Buffer.from(buffer));
 
-      const caption = ctx.message.caption || `Analyze: ${doc.file_name}`;
-      await handleUserMessage(ctx, `[File: ${filePath}]\n\n${caption}`, `[File] ${caption}`);
+        const caption = ctx.message.caption || `Analyze: ${doc.file_name}`;
+        await handleUserMessage(
+          ctx,
+          `[File: ${filePath}]\n\n${caption}`,
+          `[File] ${caption}`,
+          { typingManagedExternally: true }
+        );
+      });
     } catch (error) {
       console.error("Document error:", error);
       await ctx.reply("Could not process document.");
@@ -781,6 +1261,7 @@ async function main(): Promise<void> {
 
   const bot = new Bot(BOT_TOKEN);
   registerBotHandlers(bot);
+  startBackgroundTaskLoop(bot.api);
 
   bot.start({
     onStart: () => {

@@ -21,6 +21,7 @@ export interface WorkspacePaths {
   toolsNodeDir: string;
   runLedgerFile: string;
   activeTaskGraphFile: string;
+  backgroundTasksFile: string;
   autonomousConfigFile: string;
   installRequirementsFile: string;
   todosFile: string;
@@ -187,6 +188,7 @@ export function resolveWorkspacePaths(env = process.env, cwd = process.cwd()): W
     toolsNodeDir: join(workspaceDir, "tools", "node"),
     runLedgerFile: join(workspaceDir, "run_ledger.jsonl"),
     activeTaskGraphFile: join(workspaceDir, "active_task_graph.json"),
+    backgroundTasksFile: join(workspaceDir, "background_tasks.json"),
     autonomousConfigFile: join(workspaceDir, "autonomous.config.json"),
     installRequirementsFile: join(workspaceDir, "INSTALL_REQUIREMENTS.md"),
     todosFile: join(workspaceDir, "brain", "TODOS.md"),
@@ -292,6 +294,10 @@ export async function ensureWorkspaceBootstrap(
 
   if (await ensureFile(paths.runLedgerFile, "")) {
     createdFiles.push(paths.runLedgerFile);
+  }
+
+  if (await ensureFile(paths.backgroundTasksFile, "[]\n")) {
+    createdFiles.push(paths.backgroundTasksFile);
   }
 
   if (copiedFiles.length > 0 || createdFiles.length > 0) {

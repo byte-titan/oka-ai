@@ -58,6 +58,7 @@ The relay uses a workspace directory:
 - local dev (`bun run dev`): `./.oka`
 
 Runtime temp files, uploads, session state, and prompt config live there.
+When autonomous mode is enabled, complex requests are queued to `background_tasks.json` and processed asynchronously.
 
 ## Telnyx + ElevenLabs Phone Calls
 
@@ -363,6 +364,8 @@ AUTONOMOUS_V3_ENABLED=true
 AUTONOMOUS_MAINTENANCE_LOOP=false
 AUTONOMOUS_MAINTENANCE_INTERVAL_MINUTES=60
 AUTONOMOUS_MEMORY_RETENTION_DAYS=30
+BACKGROUND_TASK_LOOP_MS=5000
+BACKGROUND_TASK_MAX_ATTEMPTS=2
 
 # Optional - Features
 SUPABASE_URL=             # For cloud memory persistence
