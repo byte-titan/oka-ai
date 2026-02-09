@@ -12,7 +12,7 @@
  */
 
 import { spawn } from "bun";
-import { mkdir, readFile, writeFile } from "fs/promises";
+import { mkdir, readFile, writeFile, stat } from "fs/promises";
 import { dirname, isAbsolute, join } from "path";
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
@@ -92,19 +92,31 @@ async function saveState(state: CheckinState): Promise<void> {
 // ============================================================
 
 async function getGoals(): Promise<string[]> {
-  // Load from your persistence layer
-  // Example: Supabase, JSON file, etc.
-  return ["Finish video edit by 5pm", "Review PR"];
+  const todos = await readTodoItems();
+  return todos.slice(0, 5);
 }
 
 async function getCalendarContext(): Promise<string> {
-  // What's coming up today?
-  return "Next event: Team call in 2 hours";
+  const calendarPath = join(WORKSPACE_DIR, "CALENDAR.md");
+  try {
+    const content = await readFile(calendarPath, "utf-8");
+    const lines = content
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(0, 5);
+    if (lines.length === 0) return "None";
+    return lines.join(" | ");
+  } catch {
+    return "None";
+  }
 }
 
 async function getLastActivity(): Promise<string> {
-  const state = await loadState();
-  const lastMsg = new Date(state.lastMessageTime);
+  const lastMsg = await getLastUserActivityTime();
+  if (!lastMsg) {
+    return "Last message: unknown";
+  }
   const now = new Date();
   const hoursSince = (now.getTime() - lastMsg.getTime()) / (1000 * 60 * 60);
 
@@ -146,6 +158,7 @@ async function askCodexToDecide(): Promise<{
   const goals = await getGoals();
   const calendar = await getCalendarContext();
   const activity = await getLastActivity();
+  const pendingItems = await readTodoItems();
 
   const now = new Date();
   const hour = now.getHours();
@@ -159,7 +172,7 @@ async function askCodexToDecide(): Promise<{
     lastCheckin: state.lastCheckinTime || "Never",
     goals: goals.join(", ") || "None",
     calendar,
-    pendingItems: state.pendingItems.join(", ") || "None",
+    pendingItems: pendingItems.join(", ") || "None",
   });
 
   try {
@@ -289,6 +302,50 @@ interface HeartbeatPromptContext {
   goals: string;
   calendar: string;
   pendingItems: string;
+}
+
+async function readTodoItems(): Promise<string[]> {
+  const todoPath = join(WORKSPACE_DIR, "brain", "TODOS.md");
+  try {
+    const content = await readFile(todoPath, "utf-8");
+    return content
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => /^[-*]\s+\[\s\]\s+/.test(line))
+      .map((line) => line.replace(/^[-*]\s+\[\s\]\s+/, "").trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+async function getLastUserActivityTime(): Promise<Date | null> {
+  const sessionPath = join(WORKSPACE_DIR, "session.json");
+  try {
+    const content = await readFile(sessionPath, "utf-8");
+    const parsed = JSON.parse(content) as { lastActivity?: string };
+    if (parsed.lastActivity) {
+      return new Date(parsed.lastActivity);
+    }
+  } catch {
+    // Fall through to memory file mtime.
+  }
+
+  const today = formatDateForFile(new Date());
+  const memoryPath = join(WORKSPACE_DIR, "memory", `${today}.md`);
+  try {
+    const s = await stat(memoryPath);
+    return s.mtime;
+  } catch {
+    return null;
+  }
+}
+
+function formatDateForFile(date: Date): string {
+  const y = date.getFullYear();
+  const m = `${date.getMonth() + 1}`.padStart(2, "0");
+  const d = `${date.getDate()}`.padStart(2, "0");
+  return `${y}-${m}-${d}`;
 }
 
 function resolvePath(pathValue: string, relativeTo = process.cwd()): string {

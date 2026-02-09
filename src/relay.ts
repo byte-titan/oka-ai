@@ -9,7 +9,7 @@
 
 import { Bot, Context } from "grammy";
 import { spawn } from "bun";
-import { writeFile, mkdir, readFile, unlink, appendFile } from "fs/promises";
+import { writeFile, mkdir, readFile, unlink, appendFile, access } from "fs/promises";
 import { dirname, isAbsolute, join } from "path";
 
 // ============================================================
@@ -31,6 +31,16 @@ const CODEX_REASONING_EFFORT = process.env.CODEX_REASONING_EFFORT || "low";
 const CODEX_MODEL = process.env.CODEX_MODEL || "";
 const CODEX_FULL_ACCESS = (process.env.CODEX_FULL_ACCESS || "true").toLowerCase() === "true";
 const CODEX_SANDBOX = process.env.CODEX_SANDBOX || "danger-full-access";
+const WHISPER_CLI_PATH = resolvePath(
+  process.env.WHISPER_CLI_PATH || join(process.cwd(), "tools/whisper.cpp/build/bin/whisper-cli")
+);
+const WHISPER_MODEL_PATH = resolvePath(
+  process.env.WHISPER_MODEL_PATH || join(process.cwd(), "tools/whisper.cpp/models/ggml-base.bin")
+);
+const FFMPEG_PATH = process.env.FFMPEG_PATH || "ffmpeg";
+const WHISPER_LANG = process.env.WHISPER_LANG || "auto";
+const WHISPER_THREADS = Math.max(1, parseInt(process.env.WHISPER_THREADS || "4", 10) || 4);
+const WHISPER_KEEP_TEMP = (process.env.WHISPER_KEEP_TEMP || "false").toLowerCase() === "true";
 
 // Directories
 const TEMP_DIR = join(WORKSPACE_DIR, "temp");
@@ -306,22 +316,49 @@ bot.on("message:text", async (ctx) => {
 bot.on("message:voice", async (ctx) => {
   console.log("Voice message received");
   await ctx.replyWithChatAction("typing");
+  let filePath = "";
+  let transcriptionPath = "";
 
-  // To handle voice, you need a transcription service
-  // Options: Whisper API, Gemini, AssemblyAI, etc.
-  //
-  // Example flow:
-  // 1. Download the voice file
-  // 2. Send to transcription service
-  // 3. Pass transcription to Codex
-  //
-  // const transcription = await transcribe(voiceFile);
-  // const response = await callCodex(`[Voice]: ${transcription}`);
+  try {
+    const voice = ctx.message.voice;
+    const file = await ctx.api.getFile(voice.file_id);
+    const timestamp = Date.now();
+    filePath = join(UPLOADS_DIR, `voice_${timestamp}.ogg`);
 
-  await ctx.reply(
-    "Voice messages require a transcription service. " +
-      "Add Whisper, Gemini, or similar to handle voice."
-  );
+    const response = await fetch(
+      `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`
+    );
+    const buffer = await response.arrayBuffer();
+    await writeFile(filePath, Buffer.from(buffer));
+
+    transcriptionPath = await prepareAudioForWhisper(filePath);
+    const transcription = await transcribeWithLocalWhisper(transcriptionPath);
+    if (!transcription) {
+      await ctx.reply("I could not transcribe that voice message.");
+      return;
+    }
+
+    const prompt = await buildPrompt(`[Voice transcription]\n${transcription}`);
+    const codexResponse = await callCodex(prompt, { resume: true });
+
+    await appendMemoryEntry("user", `[Voice] ${transcription}`);
+    await appendMemoryEntry("assistant", codexResponse);
+    await sendResponse(ctx, codexResponse);
+  } catch (error) {
+    console.error("Voice error:", error);
+    await ctx.reply(
+      "Voice transcription failed. Check WHISPER_CLI_PATH and WHISPER_MODEL_PATH configuration."
+    );
+  } finally {
+    if (!WHISPER_KEEP_TEMP) {
+      if (transcriptionPath && transcriptionPath !== filePath) {
+        await unlink(transcriptionPath).catch(() => {});
+      }
+      if (filePath) {
+        await unlink(filePath).catch(() => {});
+      }
+    }
+  }
 });
 
 // Photos/Images
@@ -513,6 +550,125 @@ async function appendMemoryEntry(role: "user" | "assistant", text: string): Prom
   } catch (error) {
     console.warn("Could not append memory entry:", error);
   }
+}
+
+async function transcribeWithLocalWhisper(audioPath: string): Promise<string> {
+  const outputBase = join(UPLOADS_DIR, `whisper_${Date.now()}`);
+  const outputCandidates = [`${outputBase}.txt`, `${audioPath}.txt`, `${audioPath}.ogg.txt`];
+
+  try {
+    const proc = spawn(
+      [
+        WHISPER_CLI_PATH,
+        "-m",
+        WHISPER_MODEL_PATH,
+        "-f",
+        audioPath,
+        "-l",
+        WHISPER_LANG,
+        "-t",
+        String(WHISPER_THREADS),
+        "-otxt",
+        "-of",
+        outputBase,
+      ],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+
+    const stdout = await new Response(proc.stdout).text();
+    const stderr = await new Response(proc.stderr).text();
+    const exitCode = await proc.exited;
+
+    if (exitCode !== 0) {
+      throw new Error(stderr || stdout || `whisper-cli exited with code ${exitCode}`);
+    }
+
+    for (const outputTxt of outputCandidates) {
+      try {
+        await access(outputTxt);
+        const text = await readFile(outputTxt, "utf-8");
+        const trimmed = text.trim();
+        if (trimmed) return trimmed;
+      } catch {
+        // Check next candidate.
+      }
+    }
+
+    const stdoutTranscript = extractTranscriptFromWhisperStdout(stdout, stderr);
+    if (stdoutTranscript) return stdoutTranscript;
+
+    throw new Error(
+      `Whisper completed but no transcript was produced. stdout=${stdout.slice(0, 400)} stderr=${stderr.slice(0, 400)}`
+    );
+  } finally {
+    for (const outputTxt of outputCandidates) {
+      if (!WHISPER_KEEP_TEMP) {
+        await unlink(outputTxt).catch(() => {});
+      }
+    }
+  }
+}
+
+async function prepareAudioForWhisper(sourcePath: string): Promise<string> {
+  // Telegram voice notes are usually OGG/Opus. Convert to WAV for reliable decoding.
+  if (!sourcePath.toLowerCase().endsWith(".ogg")) {
+    return sourcePath;
+  }
+
+  const wavPath = sourcePath.replace(/\.ogg$/i, ".wav");
+  try {
+    const proc = spawn(
+      [FFMPEG_PATH, "-y", "-i", sourcePath, "-ar", "16000", "-ac", "1", wavPath],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    const stderr = await new Response(proc.stderr).text();
+    const exitCode = await proc.exited;
+    if (exitCode !== 0) {
+      console.warn("ffmpeg convert failed, falling back to original audio:", stderr);
+      return sourcePath;
+    }
+    return wavPath;
+  } catch (error) {
+    console.warn("ffmpeg unavailable, falling back to original audio:", error);
+    return sourcePath;
+  }
+}
+
+function extractTranscriptFromWhisperStdout(stdout: string, stderr: string): string {
+  const combined = `${stdout}\n${stderr}`;
+  const lines = combined
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => {
+      return !(
+        line.startsWith("whisper_") ||
+        line.startsWith("system_info:") ||
+        line.startsWith("main:") ||
+        line.startsWith("output_txt:") ||
+        line.startsWith("output_vtt:") ||
+        line.startsWith("output_srt:") ||
+        line.startsWith("whisper_print_timings:")
+      );
+    });
+
+  if (lines.length === 0) return "";
+
+  // Keep timestamped output but strip leading timestamp windows.
+  const cleaned = lines
+    .map((line) =>
+      line.replace(/^\[\d{2}:\d{2}:\d{2}\.\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}\.\d{3}\]\s*/, "")
+    )
+    .join("\n")
+    .trim();
+
+  return cleaned;
 }
 
 async function loadRecentMemoryContext(timezone: string): Promise<string> {

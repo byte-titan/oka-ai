@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "start": "sh -c 'bun run src/relay.ts & HEARTBEAT_LOOP=true bun run examples/smart-checkin.ts; wait'",
-    "dev": "sh -c 'OKA_WORKSPACE_DIR=.oka bun run --watch src/relay.ts & OKA_WORKSPACE_DIR=.oka HEARTBEAT_LOOP=true HEARTBEAT_INTERVAL_MINUTES=10 bun run examples/smart-checkin.ts; wait'"
+    "dev": "sh -c 'OKA_WORKSPACE_DIR=.oka bun run --watch src/relay.ts & OKA_WORKSPACE_DIR=.oka HEARTBEAT_LOOP=true HEARTBEAT_INTERVAL_MINUTES=5 bun run examples/smart-checkin.ts; wait'"
   },
   "dependencies": {
     "grammy": "^1.21.1"
