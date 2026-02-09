@@ -65,6 +65,10 @@ interface CodexEvent {
   };
 }
 
+const TELEGRAM_MAX_MESSAGE_LENGTH = 4000;
+const TELEGRAM_PARSE_MODE = "MarkdownV2" as const;
+const TELEGRAM_MD_V2_SPECIAL_CHARS = /[_*[\]()~`>#+\-=|{}.!]/g;
+
 const DEFAULT_AGENTS_TEMPLATE = `
 You are responding via Telegram. Keep responses concise and actionable.
 
@@ -184,7 +188,7 @@ bot.use(async (ctx, next) => {
   // If ALLOWED_USER_ID is set, enforce it
   if (ALLOWED_USER_ID && userId !== ALLOWED_USER_ID) {
     console.log(`Unauthorized: ${userId}`);
-    await ctx.reply("This bot is private.");
+    await replyTelegram(ctx, "This bot is private.");
     return;
   }
 
@@ -338,7 +342,7 @@ bot.on("message:voice", async (ctx) => {
     transcriptionPath = await prepareAudioForWhisper(filePath);
     const transcription = await transcribeWithLocalWhisper(transcriptionPath);
     if (!transcription) {
-      await ctx.reply("I could not transcribe that voice message.");
+      await replyTelegram(ctx, "I could not transcribe that voice message.");
       return;
     }
 
@@ -350,7 +354,8 @@ bot.on("message:voice", async (ctx) => {
     await sendResponse(ctx, codexResponse);
   } catch (error) {
     console.error("Voice error:", error);
-    await ctx.reply(
+    await replyTelegram(
+      ctx,
       "Voice transcription failed. Check WHISPER_CLI_PATH and WHISPER_MODEL_PATH configuration."
     );
   } finally {
@@ -400,7 +405,7 @@ bot.on("message:photo", async (ctx) => {
     await sendResponse(ctx, codexResponse);
   } catch (error) {
     console.error("Image error:", error);
-    await ctx.reply("Could not process image.");
+    await replyTelegram(ctx, "Could not process image.");
   }
 });
 
@@ -434,7 +439,7 @@ bot.on("message:document", async (ctx) => {
     await sendResponse(ctx, codexResponse);
   } catch (error) {
     console.error("Document error:", error);
-    await ctx.reply("Could not process document.");
+    await replyTelegram(ctx, "Could not process document.");
   }
 });
 
@@ -715,11 +720,8 @@ async function loadRecentMemoryContext(timezone: string): Promise<string> {
 }
 
 async function sendResponse(ctx: Context, response: string): Promise<void> {
-  // Telegram has a 4096 character limit
-  const MAX_LENGTH = 4000;
-
-  if (response.length <= MAX_LENGTH) {
-    await ctx.reply(response);
+  if (response.length <= TELEGRAM_MAX_MESSAGE_LENGTH) {
+    await replyTelegram(ctx, response);
     return;
   }
 
@@ -728,24 +730,57 @@ async function sendResponse(ctx: Context, response: string): Promise<void> {
   let remaining = response;
 
   while (remaining.length > 0) {
-    if (remaining.length <= MAX_LENGTH) {
+    if (remaining.length <= TELEGRAM_MAX_MESSAGE_LENGTH) {
       chunks.push(remaining);
       break;
     }
 
     // Try to split at a natural boundary
-    let splitIndex = remaining.lastIndexOf("\n\n", MAX_LENGTH);
-    if (splitIndex === -1) splitIndex = remaining.lastIndexOf("\n", MAX_LENGTH);
-    if (splitIndex === -1) splitIndex = remaining.lastIndexOf(" ", MAX_LENGTH);
-    if (splitIndex === -1) splitIndex = MAX_LENGTH;
+    let splitIndex = remaining.lastIndexOf("\n\n", TELEGRAM_MAX_MESSAGE_LENGTH);
+    if (splitIndex === -1) splitIndex = remaining.lastIndexOf("\n", TELEGRAM_MAX_MESSAGE_LENGTH);
+    if (splitIndex === -1) splitIndex = remaining.lastIndexOf(" ", TELEGRAM_MAX_MESSAGE_LENGTH);
+    if (splitIndex === -1) splitIndex = TELEGRAM_MAX_MESSAGE_LENGTH;
 
     chunks.push(remaining.substring(0, splitIndex));
     remaining = remaining.substring(splitIndex).trim();
   }
 
   for (const chunk of chunks) {
-    await ctx.reply(chunk);
+    await replyTelegram(ctx, chunk);
   }
+}
+
+function escapeMarkdownV2(text: string): string {
+  return text.replace(TELEGRAM_MD_V2_SPECIAL_CHARS, "\\$&");
+}
+
+function normalizeMarkdownForTelegram(text: string): string {
+  // Telegram MarkdownV2 uses *bold* instead of **bold**.
+  return text.replace(/\*\*(.+?)\*\*/gs, "*$1*");
+}
+
+async function replyTelegram(ctx: Context, text: string): Promise<void> {
+  const normalizedText = normalizeMarkdownForTelegram(text);
+
+  try {
+    await ctx.reply(normalizedText, { parse_mode: TELEGRAM_PARSE_MODE });
+    return;
+  } catch (error) {
+    console.warn("MarkdownV2 send failed, retrying with escaped text.", error);
+  }
+
+  const escapedText = escapeMarkdownV2(normalizedText);
+
+  if (escapedText.length <= TELEGRAM_MAX_MESSAGE_LENGTH) {
+    try {
+      await ctx.reply(escapedText, { parse_mode: TELEGRAM_PARSE_MODE });
+      return;
+    } catch (error) {
+      console.warn("Escaped MarkdownV2 send failed, retrying as plain text.", error);
+    }
+  }
+
+  await ctx.reply(text);
 }
 
 // ============================================================

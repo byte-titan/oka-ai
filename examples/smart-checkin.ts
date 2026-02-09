@@ -34,6 +34,9 @@ const STATE_FILE = resolvePath(
   process.env.CHECKIN_STATE_FILE || join(WORKSPACE_DIR, "checkin-state.json"),
   WORKSPACE_DIR
 );
+const TELEGRAM_PARSE_MODE = "MarkdownV2" as const;
+const TELEGRAM_MAX_MESSAGE_LENGTH = 4000;
+const TELEGRAM_MD_V2_SPECIAL_CHARS = /[_*[\]()~`>#+\-=|{}.!]/g;
 let heartbeatLoadWarningShown = false;
 
 const DEFAULT_HEARTBEAT_TEMPLATE = `
@@ -128,22 +131,80 @@ async function getLastActivity(): Promise<string> {
 // ============================================================
 
 async function sendTelegram(message: string): Promise<boolean> {
+  for (const chunk of splitTelegramChunks(message)) {
+    const sent = await sendTelegramChunk(chunk);
+    if (!sent) return false;
+  }
+  return true;
+}
+
+function splitTelegramChunks(message: string): string[] {
+  const chunks: string[] = [];
+  let remaining = message;
+
+  while (remaining.length > 0) {
+    if (remaining.length <= TELEGRAM_MAX_MESSAGE_LENGTH) {
+      chunks.push(remaining);
+      break;
+    }
+
+    let splitIndex = remaining.lastIndexOf("\n\n", TELEGRAM_MAX_MESSAGE_LENGTH);
+    if (splitIndex === -1) splitIndex = remaining.lastIndexOf("\n", TELEGRAM_MAX_MESSAGE_LENGTH);
+    if (splitIndex === -1) splitIndex = remaining.lastIndexOf(" ", TELEGRAM_MAX_MESSAGE_LENGTH);
+    if (splitIndex === -1) splitIndex = TELEGRAM_MAX_MESSAGE_LENGTH;
+
+    chunks.push(remaining.slice(0, splitIndex));
+    remaining = remaining.slice(splitIndex).trimStart();
+  }
+
+  return chunks;
+}
+
+function normalizeMarkdownForTelegram(text: string): string {
+  return text.replace(/\*\*(.+?)\*\*/gs, "*$1*");
+}
+
+function escapeMarkdownV2(text: string): string {
+  return text.replace(TELEGRAM_MD_V2_SPECIAL_CHARS, "\\$&");
+}
+
+async function callTelegramApi(text: string, parseMode?: typeof TELEGRAM_PARSE_MODE): Promise<boolean> {
   try {
-    const response = await fetch(
-      `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: CHAT_ID,
-          text: message,
-        }),
-      }
-    );
+    const body: Record<string, string> = {
+      chat_id: CHAT_ID,
+      text,
+    };
+    if (parseMode) {
+      body.parse_mode = parseMode;
+    }
+
+    const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
     return response.ok;
   } catch {
     return false;
   }
+}
+
+async function sendTelegramChunk(chunk: string): Promise<boolean> {
+  const normalized = normalizeMarkdownForTelegram(chunk);
+
+  if (await callTelegramApi(normalized, TELEGRAM_PARSE_MODE)) {
+    return true;
+  }
+
+  const escaped = escapeMarkdownV2(normalized);
+  if (escaped.length <= TELEGRAM_MAX_MESSAGE_LENGTH) {
+    if (await callTelegramApi(escaped, TELEGRAM_PARSE_MODE)) {
+      return true;
+    }
+  }
+
+  return callTelegramApi(chunk);
 }
 
 // ============================================================

@@ -46,13 +46,17 @@ bun install
 cp .env.example .env
 # Edit .env with your tokens
 
+# Initialize workspace defaults (./.oka by default)
+# Copies missing files from defaults/workspace without overwriting existing files.
+SKIP_WHISPER_SETUP=true bash scripts/setup.sh
+
 # Run
 bun run src/relay.ts
 ```
 
 The relay uses a workspace directory:
-- default: `~/.oka`
-- local dev (`bun run dev`): `./.oka`
+- default: `./.oka`
+- override with `OKA_WORKSPACE_DIR` (for example `~/.oka`)
 
 Runtime temp files, uploads, session state, and prompt config live there.
 
