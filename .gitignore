@@ -11,6 +11,7 @@ bun.lockb
 # Runtime files
 *.lock
 *.log
+.oka/
 temp/
 uploads/
 session.json

@@ -4,7 +4,7 @@
 <dict>
     <!-- Unique identifier for this service -->
     <key>Label</key>
-    <string>com.claude.telegram-relay</string>
+    <string>com.codex.telegram-relay</string>
 
     <!-- Command to run -->
     <key>ProgramArguments</key>
@@ -18,13 +18,13 @@
     <!-- Working directory -->
     <key>WorkingDirectory</key>
     <!-- UPDATE THIS: Path to your relay directory -->
-    <string>/Users/YOUR_USERNAME/claude-telegram-relay</string>
+    <string>/Users/YOUR_USERNAME/codex-telegram-relay</string>
 
     <!-- Environment variables -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <!-- UPDATE THIS: Include paths to bun, node, claude -->
+        <!-- UPDATE THIS: Include paths to bun, node, codex -->
         <string>/Users/YOUR_USERNAME/.bun/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>HOME</key>
         <!-- UPDATE THIS -->
@@ -42,11 +42,11 @@
     <!-- Log files -->
     <key>StandardOutPath</key>
     <!-- UPDATE THIS -->
-    <string>/Users/YOUR_USERNAME/Library/Logs/claude-telegram-relay.log</string>
+    <string>/Users/YOUR_USERNAME/Library/Logs/codex-telegram-relay.log</string>
 
     <key>StandardErrorPath</key>
     <!-- UPDATE THIS -->
-    <string>/Users/YOUR_USERNAME/Library/Logs/claude-telegram-relay.error.log</string>
+    <string>/Users/YOUR_USERNAME/Library/Logs/codex-telegram-relay.error.log</string>
 
     <!-- Wait 10 seconds before restarting after crash -->
     <key>ThrottleInterval</key>
@@ -60,23 +60,23 @@ SETUP INSTRUCTIONS:
 1. Replace all YOUR_USERNAME with your actual macOS username
 
 2. Copy to LaunchAgents:
-   cp daemon/launchagent.plist ~/Library/LaunchAgents/com.claude.telegram-relay.plist
+   cp daemon/launchagent.plist ~/Library/LaunchAgents/com.codex.telegram-relay.plist
 
 3. Make sure your .env file exists in the relay directory
 
 4. Load the agent:
-   launchctl load ~/Library/LaunchAgents/com.claude.telegram-relay.plist
+   launchctl load ~/Library/LaunchAgents/com.codex.telegram-relay.plist
 
 5. Check if running:
-   launchctl list | grep claude
+   launchctl list | grep codex
 
 6. View logs:
-   tail -f ~/Library/Logs/claude-telegram-relay.log
+   tail -f ~/Library/Logs/codex-telegram-relay.log
 
 7. To stop:
-   launchctl unload ~/Library/LaunchAgents/com.claude.telegram-relay.plist
+   launchctl unload ~/Library/LaunchAgents/com.codex.telegram-relay.plist
 
 8. To restart:
-   launchctl unload ~/Library/LaunchAgents/com.claude.telegram-relay.plist
-   launchctl load ~/Library/LaunchAgents/com.claude.telegram-relay.plist
+   launchctl unload ~/Library/LaunchAgents/com.codex.telegram-relay.plist
+   launchctl load ~/Library/LaunchAgents/com.codex.telegram-relay.plist
 -->

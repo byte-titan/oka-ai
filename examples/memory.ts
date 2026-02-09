@@ -186,7 +186,7 @@ if (text.startsWith("done:")) {
   return;
 }
 
-// Add memory context to Claude prompts
+// Add memory context to Codex prompts
 const memoryContext = await getMemoryContext();
 const fullPrompt = `
 ${memoryContext}
@@ -196,12 +196,12 @@ User: ${text}
 */
 
 // ============================================================
-// INTENT DETECTION (Let Claude manage memory)
+// INTENT DETECTION (Let Codex manage memory)
 // ============================================================
 
 /*
-Instead of explicit commands, let Claude detect intent and manage memory.
-Add this to your Claude prompt:
+Instead of explicit commands, let Codex detect intent and manage memory.
+Add this to your Codex prompt:
 
 "
 MEMORY MANAGEMENT:
@@ -215,7 +215,7 @@ include these tags in your response:
 These will be processed automatically.
 "
 
-Then parse Claude's response:
+Then parse Codex's response:
 
 async function processIntents(response: string): Promise<string> {
   let clean = response;

@@ -1,16 +1,16 @@
-# Claude Code Telegram Relay
+# Codex Telegram Relay
 
-**A pattern for running Claude Code as an always-on Telegram bot.**
+**A pattern for running Codex as an always-on Telegram bot.**
 
 > **This is a reference implementation, not a copy-paste solution.** Take the patterns here and build your own system tailored to your needs.
 
 ## What This Is
 
-A minimal relay that connects Telegram to Claude Code CLI. You send a message on Telegram, the relay spawns `claude -p`, and sends the response back. That's it.
+A minimal relay that connects Telegram to Codex CLI. You send a message on Telegram, the relay spawns `codex exec`, and sends the response back.
 
 ```
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│   Telegram   │────▶│    Relay     │────▶│  Claude CLI  │
+│   Telegram   │────▶│    Relay     │────▶│  Codex CLI   │
 │    (you)     │◀────│  (always on) │◀────│   (spawned)  │
 └──────────────┘     └──────────────┘     └──────────────┘
 ```
@@ -19,16 +19,16 @@ A minimal relay that connects Telegram to Claude Code CLI. You send a message on
 
 | Approach | Pros | Cons |
 |----------|------|------|
-| **This (CLI spawn)** | Simple, uses full Claude Code capabilities, all tools available | Spawns new process per message |
-| Claude API direct | Lower latency | No tools, no MCP, no context |
-| Claude Agent SDK | Production-ready, streaming | More complex setup |
+| **This (CLI spawn)** | Simple, uses full Codex capabilities, all tools available | Spawns new process per message |
+| API direct | Lower latency | No tool use, no MCP, less local context |
+| Agent SDK | Production-ready, streaming | More complex setup |
 
-The CLI spawn approach is the simplest way to get Claude Code's full power (tools, MCP servers, context) accessible via Telegram.
+The CLI spawn approach is the simplest way to get Codex tool use (shell, files, MCP, context) accessible via Telegram.
 
 ## Requirements
 
 - [Bun](https://bun.sh/) runtime (or Node.js 18+)
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
+- Codex CLI installed and authenticated (`codex` command available in `PATH`)
 - Telegram Bot Token (from [@BotFather](https://t.me/BotFather))
 - Your Telegram User ID (from [@userinfobot](https://t.me/userinfobot))
 
@@ -36,8 +36,8 @@ The CLI spawn approach is the simplest way to get Claude Code's full power (tool
 
 ```bash
 # Clone (or fork and customize)
-git clone https://github.com/YOUR_USERNAME/claude-telegram-relay
-cd claude-telegram-relay
+git clone https://github.com/YOUR_USERNAME/codex-telegram-relay
+cd codex-telegram-relay
 
 # Install dependencies
 bun install
@@ -50,6 +50,29 @@ cp .env.example .env
 bun run src/relay.ts
 ```
 
+The relay uses a workspace directory:
+- default: `~/.oka`
+- local dev (`bun run dev`): `./.oka`
+
+Runtime temp files, uploads, session state, and prompt config live there.
+
+## Prompt Files
+
+Edit prompt files directly:
+- Main chat prompt:
+  default: `~/.oka/AGENTS.md`
+  local dev (`bun run dev`): `./.oka/AGENTS.md`
+- Cron heartbeat prompt (used by `examples/smart-checkin.ts`):
+  default: `~/.oka/HEARTBEAT.md`
+  local dev with `OKA_WORKSPACE_DIR=.oka`: `./.oka/HEARTBEAT.md`
+
+The relay replaces:
+- `{{USER_MESSAGE}}` with the incoming Telegram content
+- `{{CURRENT_TIME}}` with local time
+- `{{TIMEZONE}}` with local timezone
+
+This makes prompt tuning a file edit instead of a code change.
+
 ## Cross-Platform "Always On" Setup
 
 The relay needs to run continuously. Here's how on each platform:
@@ -60,42 +83,42 @@ LaunchAgent keeps the bot running and restarts it if it crashes.
 
 ```bash
 # Copy the template
-cp daemon/launchagent.plist ~/Library/LaunchAgents/com.claude.telegram-relay.plist
+cp daemon/launchagent.plist ~/Library/LaunchAgents/com.codex.telegram-relay.plist
 
 # Edit paths in the plist to match your setup
-nano ~/Library/LaunchAgents/com.claude.telegram-relay.plist
+nano ~/Library/LaunchAgents/com.codex.telegram-relay.plist
 
 # Load it
-launchctl load ~/Library/LaunchAgents/com.claude.telegram-relay.plist
+launchctl load ~/Library/LaunchAgents/com.codex.telegram-relay.plist
 
 # Check status
-launchctl list | grep claude
+launchctl list | grep codex
 
 # View logs
-tail -f ~/Library/Logs/claude-telegram-relay.log
+tail -f ~/Library/Logs/codex-telegram-relay.log
 ```
 
-**To stop:** `launchctl unload ~/Library/LaunchAgents/com.claude.telegram-relay.plist`
+**To stop:** `launchctl unload ~/Library/LaunchAgents/com.codex.telegram-relay.plist`
 
 ### Linux (systemd)
 
 ```bash
 # Copy the template
-sudo cp daemon/claude-relay.service /etc/systemd/system/
+sudo cp daemon/codex-relay.service /etc/systemd/system/codex-relay.service
 
 # Edit paths and user
-sudo nano /etc/systemd/system/claude-relay.service
+sudo nano /etc/systemd/system/codex-relay.service
 
 # Enable and start
 sudo systemctl daemon-reload
-sudo systemctl enable claude-relay
-sudo systemctl start claude-relay
+sudo systemctl enable codex-relay
+sudo systemctl start codex-relay
 
 # Check status
-sudo systemctl status claude-relay
+sudo systemctl status codex-relay
 
 # View logs
-journalctl -u claude-relay -f
+journalctl -u codex-relay -f
 ```
 
 ### Windows (Task Scheduler)
@@ -108,7 +131,7 @@ journalctl -u claude-relay -f
 4. Action: Start a program
    - Program: `C:\Users\YOU\.bun\bin\bun.exe`
    - Arguments: `run src/relay.ts`
-   - Start in: `C:\path\to\claude-telegram-relay`
+   - Start in: `C:\path\to\codex-telegram-relay`
 5. In Properties, check "Run whether user is logged on or not"
 6. In Settings, check "Restart if the task fails"
 
@@ -121,7 +144,7 @@ PM2 works on all platforms and handles restarts, logs, and monitoring.
 npm install -g pm2
 
 # Start the relay
-pm2 start src/relay.ts --interpreter bun --name claude-relay
+pm2 start src/relay.ts --interpreter bun --name codex-relay
 
 # Save the process list
 pm2 save
@@ -136,9 +159,9 @@ pm2 startup
 
 ```bash
 # Download NSSM, then:
-nssm install claude-relay "C:\Users\YOU\.bun\bin\bun.exe" "run src/relay.ts"
-nssm set claude-relay AppDirectory "C:\path\to\claude-telegram-relay"
-nssm start claude-relay
+nssm install codex-relay "C:\Users\YOU\.bun\bin\bun.exe" "run src/relay.ts"
+nssm set codex-relay AppDirectory "C:\path\to\codex-telegram-relay"
+nssm start codex-relay
 ```
 
 ## Architecture
@@ -155,7 +178,7 @@ examples/
 
 daemon/
   launchagent.plist     # macOS daemon config
-  claude-relay.service  # Linux systemd config
+  codex-relay.service   # Linux systemd config
 ```
 
 ## The Core Pattern
@@ -163,18 +186,26 @@ daemon/
 The relay does three things:
 
 1. **Listen** for Telegram messages
-2. **Spawn** Claude CLI with the message
+2. **Spawn** Codex CLI with the message
 3. **Send** the response back
 
 ```typescript
 // Simplified core pattern
 bot.on("message:text", async (ctx) => {
-  const response = await spawnClaude(ctx.message.text);
+  const response = await spawnCodex(ctx.message.text);
   await ctx.reply(response);
 });
 
-async function spawnClaude(prompt: string): Promise<string> {
-  const proc = spawn(["claude", "-p", prompt, "--output-format", "text"]);
+async function spawnCodex(prompt: string): Promise<string> {
+  const proc = spawn([
+    "codex",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "exec",
+    "--json",
+    "-c",
+    "model_reasoning_effort=\"low\"",
+    prompt
+  ]);
   const output = await new Response(proc.stdout).text();
   return output;
 }
@@ -194,25 +225,29 @@ if (ctx.from?.id.toString() !== process.env.TELEGRAM_USER_ID) {
 
 ### Session Continuity
 ```typescript
-// Resume conversations with --resume
+// Resume conversations with codex exec resume
 const proc = spawn([
-  "claude", "-p", prompt,
-  "--resume", sessionId,  // Continue previous conversation
-  "--output-format", "text"
+  "codex",
+  "--dangerously-bypass-approvals-and-sandbox",
+  "exec",
+  "--json",
+  "resume",
+  sessionId,
+  prompt
 ]);
 ```
 
 ### Voice Messages
 ```typescript
-// Transcribe with Whisper/Gemini, send to Claude
+// Transcribe with Whisper/Gemini, send to Codex
 const transcription = await transcribe(voiceFile);
-const response = await spawnClaude(`[Voice message]: ${transcription}`);
+const response = await spawnCodex(`[Voice message]: ${transcription}`);
 ```
 
 ### Images
 ```typescript
-// Claude Code can see images if you pass the path
-const response = await spawnClaude(`Analyze this image: ${imagePath}`);
+// Codex can see images if you pass the path
+const response = await spawnCodex(`Analyze this image: ${imagePath}`);
 ```
 
 ### Persistent Memory
@@ -252,7 +287,8 @@ Proactive assistant that checks in based on context:
 - Pending goals with deadlines
 - Calendar events coming up
 
-Claude decides IF and WHAT to say.
+Codex decides IF and WHAT to say.
+Prompt source: `~/.oka/HEARTBEAT.md` (override with `HEARTBEAT_FILE`).
 
 ### Memory Persistence (`examples/memory.ts`)
 
@@ -268,9 +304,19 @@ Pattern for remembering facts and goals across sessions:
 TELEGRAM_BOT_TOKEN=       # From @BotFather
 TELEGRAM_USER_ID=         # From @userinfobot (for security)
 
-# Optional - Paths (defaults work for most setups)
-CLAUDE_PATH=claude        # Path to claude CLI (if not in PATH)
-RELAY_DIR=~/.claude-relay # Working directory for temp files
+# Optional - Codex defaults
+CODEX_PATH=codex                      # Path to codex CLI (if not in PATH)
+CODEX_REASONING_EFFORT=low            # low | medium | high
+CODEX_FULL_ACCESS=true                # true => bypass sandbox + approvals
+CODEX_SANDBOX=danger-full-access      # Used only when CODEX_FULL_ACCESS=false
+CODEX_MODEL=                          # Optional model override
+
+# Optional - Workspace + prompt
+OKA_WORKSPACE_DIR=~/.oka              # Workspace root for temp/uploads/session/config
+AGENTS_FILE=~/.oka/AGENTS.md          # Main relay prompt file
+HEARTBEAT_FILE=~/.oka/HEARTBEAT.md    # Cron heartbeat prompt (smart-checkin)
+PROMPT_FILE=~/.oka/AGENTS.md          # Backward-compatible alias for AGENTS_FILE
+RELAY_DIR=~/.oka                      # Backward-compatible alias for OKA_WORKSPACE_DIR
 
 # Optional - Features
 SUPABASE_URL=             # For cloud memory persistence
@@ -283,7 +329,7 @@ ELEVENLABS_API_KEY=       # For voice responses
 
 **Q: Why spawn CLI instead of using the API directly?**
 
-The CLI gives you everything: tools, MCP servers, context management, permissions. The API is just the model. If you want the full Claude Code experience on mobile, you spawn the CLI.
+The CLI gives you everything: tools, MCP servers, context management, and command execution. The API is just the model.
 
 **Q: Isn't spawning a process slow?**
 
@@ -291,22 +337,22 @@ It's ~1-2 seconds overhead. For a personal assistant, that's fine. If you need s
 
 **Q: Can I use this with other CLIs?**
 
-Yes. The pattern works with any CLI that accepts prompts and returns text. Swap `claude` for your preferred tool.
+Yes. The pattern works with any CLI that accepts prompts and returns text. Swap `codex` for your preferred tool.
 
 **Q: How do I handle long-running tasks?**
 
-Claude Code can take minutes for complex tasks. The relay handles this by streaming or waiting. Set appropriate timeouts.
+Codex can take minutes for complex tasks. The relay handles this by waiting and then replying. Set appropriate timeouts.
 
 **Q: What about MCP servers?**
 
-They work. Claude CLI uses your `~/.claude/settings.json` config, so all your MCP servers are available.
+They work. Codex uses your local Codex config (for example `~/.codex/config.toml`), so MCP servers remain available.
 
 ## Security Notes
 
 1. **Always verify user ID** - Never run an open bot
 2. **Don't commit `.env`** - It's in `.gitignore`
-3. **Limit permissions** - Consider `--permission-mode` flag
-4. **Review commands** - Claude can execute bash, be aware of what you're allowing
+3. **Limit permissions** - Set `CODEX_FULL_ACCESS=false` if you do not want unrestricted command execution
+4. **Review commands** - Codex can execute shell commands, be explicit about trust boundaries
 
 ## Credits
 

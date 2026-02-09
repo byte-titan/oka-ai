@@ -15,7 +15,7 @@ The simplest approach using Windows' built-in scheduler.
    - Click "Create Task" (not "Create Basic Task" for more options)
 
 3. **General Tab**
-   - Name: `Claude Telegram Relay`
+   - Name: `Codex Telegram Relay`
    - Check "Run whether user is logged on or not"
    - Check "Run with highest privileges"
 
@@ -27,7 +27,7 @@ The simplest approach using Windows' built-in scheduler.
    - New > Start a program
    - Program: `C:\Users\YOUR_USERNAME\.bun\bin\bun.exe`
    - Arguments: `run src/relay.ts`
-   - Start in: `C:\path\to\claude-telegram-relay`
+   - Start in: `C:\path\to\codex-telegram-relay`
 
 6. **Settings Tab**
    - Check "If the task fails, restart every: 1 minute"
@@ -40,13 +40,13 @@ The simplest approach using Windows' built-in scheduler.
 
 ```powershell
 # Check if running
-schtasks /query /tn "Claude Telegram Relay"
+schtasks /query /tn "Codex Telegram Relay"
 
 # Start manually
-schtasks /run /tn "Claude Telegram Relay"
+schtasks /run /tn "Codex Telegram Relay"
 
 # Stop
-schtasks /end /tn "Claude Telegram Relay"
+schtasks /end /tn "Codex Telegram Relay"
 ```
 
 ---
@@ -66,10 +66,10 @@ npm install -g pm2-windows-startup  # For auto-start on Windows
 
 ```powershell
 # Navigate to relay directory
-cd C:\path\to\claude-telegram-relay
+cd C:\path\to\codex-telegram-relay
 
 # Start the relay
-pm2 start src/relay.ts --interpreter bun --name claude-relay
+pm2 start src/relay.ts --interpreter bun --name codex-relay
 
 # Save process list
 pm2 save
@@ -78,10 +78,10 @@ pm2 save
 pm2-startup install
 
 # Other commands:
-pm2 logs claude-relay      # View logs
-pm2 restart claude-relay   # Restart
-pm2 stop claude-relay      # Stop
-pm2 delete claude-relay    # Remove
+pm2 logs codex-relay      # View logs
+pm2 restart codex-relay   # Restart
+pm2 stop codex-relay      # Stop
+pm2 delete codex-relay    # Remove
 pm2 list                   # List all processes
 ```
 
@@ -101,30 +101,30 @@ NSSM (Non-Sucking Service Manager) turns any program into a proper Windows servi
 
 ```powershell
 # Install as service (opens GUI)
-nssm install claude-relay
+nssm install codex-relay
 
 # Or via command line:
-nssm install claude-relay "C:\Users\YOUR_USERNAME\.bun\bin\bun.exe" "run src/relay.ts"
-nssm set claude-relay AppDirectory "C:\path\to\claude-telegram-relay"
-nssm set claude-relay DisplayName "Claude Telegram Relay"
-nssm set claude-relay Description "Telegram bot relay for Claude Code"
-nssm set claude-relay Start SERVICE_AUTO_START
+nssm install codex-relay "C:\Users\YOUR_USERNAME\.bun\bin\bun.exe" "run src/relay.ts"
+nssm set codex-relay AppDirectory "C:\path\to\codex-telegram-relay"
+nssm set codex-relay DisplayName "Codex Telegram Relay"
+nssm set codex-relay Description "Telegram bot relay for Codex"
+nssm set codex-relay Start SERVICE_AUTO_START
 
 # Set environment variables
-nssm set claude-relay AppEnvironmentExtra HOME=C:\Users\YOUR_USERNAME
+nssm set codex-relay AppEnvironmentExtra HOME=C:\Users\YOUR_USERNAME
 
 # Start the service
-nssm start claude-relay
+nssm start codex-relay
 ```
 
 ### Commands:
 
 ```powershell
-nssm status claude-relay   # Check status
-nssm stop claude-relay     # Stop
-nssm start claude-relay    # Start
-nssm restart claude-relay  # Restart
-nssm remove claude-relay   # Uninstall (confirm prompt)
+nssm status codex-relay   # Check status
+nssm stop codex-relay     # Stop
+nssm start codex-relay    # Start
+nssm restart codex-relay  # Restart
+nssm remove codex-relay   # Uninstall (confirm prompt)
 ```
 
 ---
@@ -137,14 +137,14 @@ nssm remove claude-relay   # Uninstall (confirm prompt)
    - Use full path: `C:\Users\YOUR_USERNAME\.bun\bin\bun.exe`
    - Or add Bun to system PATH
 
-2. **"claude not found"**
-   - Ensure Claude Code is installed: `npm install -g @anthropic-ai/claude-code`
-   - Use full path in CLAUDE_PATH env variable
+2. **"codex not found"**
+   - Ensure Codex CLI is installed and authenticated
+   - Use full path in CODEX_PATH env variable
 
 3. **Environment variables not loading**
    - For Task Scheduler: Set them in the task's "Actions" settings
    - For PM2: Use `pm2 start --env production`
-   - For NSSM: Use `nssm set claude-relay AppEnvironmentExtra VAR=value`
+   - For NSSM: Use `nssm set codex-relay AppEnvironmentExtra VAR=value`
 
 4. **Service won't start**
    - Check logs in Event Viewer > Windows Logs > Application
@@ -154,4 +154,4 @@ nssm remove claude-relay   # Uninstall (confirm prompt)
 
 - Task Scheduler: Configure in task settings
 - PM2: `%USERPROFILE%\.pm2\logs\`
-- NSSM: Configure with `nssm set claude-relay AppStdout C:\path\to\log.txt`
+- NSSM: Configure with `nssm set codex-relay AppStdout C:\path\to\log.txt`

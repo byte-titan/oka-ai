@@ -1,10 +1,10 @@
 {
-  "name": "claude-telegram-relay",
+  "name": "codex-telegram-relay",
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "bun run src/relay.ts",
-    "dev": "bun run --watch src/relay.ts"
+    "start": "sh -c 'bun run src/relay.ts & HEARTBEAT_LOOP=true bun run examples/smart-checkin.ts; wait'",
+    "dev": "sh -c 'OKA_WORKSPACE_DIR=.oka bun run --watch src/relay.ts & OKA_WORKSPACE_DIR=.oka HEARTBEAT_LOOP=true HEARTBEAT_INTERVAL_MINUTES=10 bun run examples/smart-checkin.ts; wait'"
   },
   "dependencies": {
     "grammy": "^1.21.1"
