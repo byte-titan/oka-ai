@@ -76,7 +76,7 @@ Persistent stores with clear responsibilities:
 
 4. Retrieval Store (scalable)
 - Vector/keyword index for relevant recall.
-- Supabase memory table or local index.
+- Convex memory collections or local index (fallback).
 
 5. Skill Store (new)
 - Versioned task procedures/templates/checklists.
@@ -327,63 +327,34 @@ Goal: assistant can "do whatever is needed" across services without leaking secr
 7. Secure Tooling Layer
 - Credential broker with encrypted at-rest storage and auditable access.
 
-## Codex Role Implementation Options
-You can implement Planner/Executor/Critic/Curator/Governor in two ways.
+## Codex Role Implementation Decision
+Planner/Executor/Critic/Curator/Governor will be implemented with a hybrid model: markdown role definitions + code-level orchestration and validation.
 
-### Option A: Pure Markdown Orchestration (fastest to ship)
-Use role contracts as markdown files and route each phase through those prompts.
+### Option B: Hybrid (Markdown + Code Orchestrator) (recommended)
+Keep markdown role prompts, but enforce machine-validated output in code.
 
-Recommended files:
+Required artifacts:
 - `.oka/roles/PLANNER.md`
 - `.oka/roles/EXECUTOR.md`
 - `.oka/roles/CRITIC.md`
 - `.oka/roles/CURATOR.md`
 - `.oka/roles/GOVERNOR.md`
+- `orchestrator.ts` (role runner + transition engine)
+- `schemas/*.json` (role output contracts)
+- `run_ledger.jsonl` (append-only event stream)
 
-How it works:
-1. Runtime selects role prompt file.
-2. Injects task-local context + budget.
-3. Role returns structured markdown/json block.
-4. Orchestrator parses result and advances workflow.
-
-Example planner output contract:
-```md
-## PLAN
-- task_id: T-104
-- objective: Build dashboard
-- acceptance:
-  - tests pass
-  - mobile layout works
-- steps:
-  1. schema
-  2. api
-  3. ui
-  4. tests
-- risks:
-  - missing auth flow details
-```
-
-Pros:
-- Very easy to iterate.
-- No heavy framework requirement.
-
-Limits:
-- Weaker enforcement unless outputs are schema-validated.
-
-### Option B: Hybrid (Markdown + Code Orchestrator) (recommended)
-Keep markdown role prompts, but enforce machine-validated output in code.
-
-Implementation sketch:
-1. Role prompt defines responsibilities and output schema.
-2. `orchestrator.ts` invokes Codex per role.
-3. Parse/validate role output via JSON schema.
-4. Persist events to `run_ledger.jsonl`.
-5. Trigger next role based on state machine transitions.
+Execution contract:
+1. Role prompt defines scope, constraints, and output schema id.
+2. `orchestrator.ts` invokes Codex with task-local context only.
+3. Response must parse as JSON and pass schema validation.
+4. Invalid output triggers auto-repair attempt, then controlled fail.
+5. Valid output is persisted as event + transition decision.
+6. Governor enforces approvals, retry budgets, and side-effect policy.
 
 Minimal state machine:
 - `PLANNING -> EXECUTING -> CRITIQUE -> (REPLAN|CURATE|DONE)`
 
-This gives OpenClaw-style rigor while keeping role behavior editable in markdown.
+This gives OpenClaw-style rigor while keeping behavior editable in markdown.
 
 ## Example Flow: "Build a Task Management Dashboard"
 1. Planner creates graph:
@@ -406,14 +377,25 @@ This gives OpenClaw-style rigor while keeping role behavior editable in markdown
 6. Similar future request reuses procedure + retrieved conventions.
 
 ## Minimal Implementation Plan (Practical)
-1. Add `.oka/brain/SCHEMA.md` for memory, skill, and credential metadata schema.
-2. Add role prompt files under `.oka/roles/*.md` with strict output contracts.
-3. Add `active_task_graph.json` and `run_ledger.jsonl`.
-4. Add encrypted credential broker using `.env` master key.
-5. Extend heartbeat to run Reflection + Pruning passes.
-6. Add retrieval API (`get_relevant_context(goal, k)`) with top-k budget limits.
-7. Add critic scoring + failure budget + autonomy level downgrade rules.
-8. Add skill compiler from successful repeated trajectories.
+1. Define machine contracts:
+- add `schemas/` for planner/executor/critic/curator/governor outputs
+- add `.oka/brain/SCHEMA.md` for memory + credential metadata
+2. Add role prompts under `.oka/roles/*.md` aligned to schema ids.
+3. Implement `orchestrator.ts`:
+- role invocation
+- schema validation
+- transition engine
+- retry/fail handling
+4. Add persistent runtime files:
+- `active_task_graph.json`
+- `run_ledger.jsonl`
+- transition/error audit events
+5. Add Governor enforcement:
+- approval gates for sensitive actions
+- retry budgets and autonomy downgrade rules
+6. Add retrieval API (`get_relevant_context(goal, k)`) with strict token caps.
+7. Extend heartbeat for Reflection + Pruning jobs.
+8. Add skill compiler from repeated successful trajectories.
 
 ## Success Metrics
 - Goal completion rate.
