@@ -46,8 +46,11 @@ bun install
 cp .env.example .env
 # Edit .env with your tokens
 
+# Bootstrap workspace (.oka + default markdown/config/runtime files)
+bun run setup
+
 # Run
-bun run src/relay.ts
+bun run start
 ```
 
 The relay uses a workspace directory:
@@ -62,7 +65,7 @@ The main app (`src/relay.ts`) can host phone-call endpoints in the same process.
 
 ```bash
 # Start main app (Telegram + optional voice relay)
-bun run src/relay.ts
+bun run start
 ```
 
 ### Required env vars for calls
@@ -110,7 +113,7 @@ Edit prompt files directly:
 - Main chat prompt:
   default: `~/.oka/AGENTS.md`
   local dev (`bun run dev`): `./.oka/AGENTS.md`
-- Cron heartbeat prompt (used by `examples/smart-checkin.ts`):
+- Heartbeat/maintenance prompt template:
   default: `~/.oka/HEARTBEAT.md`
   local dev with `OKA_WORKSPACE_DIR=.oka`: `./.oka/HEARTBEAT.md`
 
@@ -216,13 +219,12 @@ nssm start codex-relay
 
 ```
 src/
-  relay.ts          # Core relay (what you customize)
+  relay.ts          # Core relay runtime
+  autonomous-v3.ts  # Planner/Executor/Critic orchestration
+  setup.ts          # Workspace bootstrap command
 
 examples/
-  morning-briefing.ts   # Scheduled daily summary
-  smart-checkin.ts      # Proactive check-ins
-  memory.ts             # Persistent memory pattern
-  supabase-schema.sql   # Optional: cloud persistence
+  ...                   # Reference-only patterns (not used by start/dev scripts)
 
 daemon/
   launchagent.plist     # macOS daemon config
@@ -316,7 +318,7 @@ User: ${prompt}
 // See examples/morning-briefing.ts
 ```
 
-## Examples Included
+## Examples Included (Reference-Only)
 
 ### Morning Briefing (`examples/morning-briefing.ts`)
 
@@ -327,16 +329,6 @@ Sends a daily summary at a scheduled time:
 - Whatever else you want
 
 Schedule it with cron (Linux), launchd (Mac), or Task Scheduler (Windows).
-
-### Smart Check-in (`examples/smart-checkin.ts`)
-
-Proactive assistant that checks in based on context:
-- Time since last message
-- Pending goals with deadlines
-- Calendar events coming up
-
-Codex decides IF and WHAT to say.
-Prompt source: `~/.oka/HEARTBEAT.md` (override with `HEARTBEAT_FILE`).
 
 ### Memory Persistence (`examples/memory.ts`)
 
@@ -362,9 +354,15 @@ CODEX_MODEL=                          # Optional model override
 # Optional - Workspace + prompt
 OKA_WORKSPACE_DIR=~/.oka              # Workspace root for temp/uploads/session/config
 AGENTS_FILE=~/.oka/AGENTS.md          # Main relay prompt file
-HEARTBEAT_FILE=~/.oka/HEARTBEAT.md    # Cron heartbeat prompt (smart-checkin)
+HEARTBEAT_FILE=~/.oka/HEARTBEAT.md    # Heartbeat/maintenance prompt template
 PROMPT_FILE=~/.oka/AGENTS.md          # Backward-compatible alias for AGENTS_FILE
 RELAY_DIR=~/.oka                      # Backward-compatible alias for OKA_WORKSPACE_DIR
+
+# Optional - Autonomous concept v3
+AUTONOMOUS_V3_ENABLED=true
+AUTONOMOUS_MAINTENANCE_LOOP=false
+AUTONOMOUS_MAINTENANCE_INTERVAL_MINUTES=60
+AUTONOMOUS_MEMORY_RETENTION_DAYS=30
 
 # Optional - Features
 SUPABASE_URL=             # For cloud memory persistence

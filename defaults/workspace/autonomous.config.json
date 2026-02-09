@@ -1,0 +1,15 @@
+{
+  "version": "3",
+  "max_tasks_per_plan": 5,
+  "retry_budget_per_node": 1,
+  "replan_budget_per_run": 1,
+  "context_pack": {
+    "max_relevant_facts": 6,
+    "max_related_episodes": 8,
+    "max_procedures": 3
+  },
+  "policy": {
+    "allow_external_mutation": false
+  }
+}
+
