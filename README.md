@@ -56,6 +56,54 @@ The relay uses a workspace directory:
 
 Runtime temp files, uploads, session state, and prompt config live there.
 
+## Telnyx + ElevenLabs Phone Calls
+
+The main app (`src/relay.ts`) can host phone-call endpoints in the same process. Voice relay auto-enables when Telnyx voice env vars are present, or you can force it with `VOICE_RELAY_ENABLED=true`.
+
+```bash
+# Start main app (Telegram + optional voice relay)
+bun run src/relay.ts
+```
+
+### Required env vars for calls
+
+```bash
+TELNYX_API_KEY=...
+TELNYX_CONNECTION_ID=...
+TELNYX_FROM_NUMBER=+1...
+
+VOICE_RELAY_PUBLIC_BASE_URL=https://YOUR_PUBLIC_URL
+```
+
+### Telnyx setup
+
+- For outbound programmatic calls, the relay calls Telnyx API directly.
+- For inbound "call the bot" flow with ElevenLabs agent, configure Telnyx SIP trunk in ElevenLabs dashboard.
+- Optional webhook URL in Telnyx (for status logging): `https://YOUR_PUBLIC_URL/telnyx/webhook`
+
+### Outbound calls
+
+```bash
+# From CLI
+bun run voice:call -- +15551234567
+
+# Or via API (optional auth)
+curl -X POST https://YOUR_PUBLIC_URL/telnyx/outbound/start \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $VOICE_RELAY_AUTH_TOKEN" \
+  -d '{"to":"+15551234567"}'
+```
+
+### Local testing
+
+Use an HTTPS tunnel so Telnyx can reach your machine:
+
+```bash
+ngrok http 8787
+```
+
+Then set `VOICE_RELAY_PUBLIC_BASE_URL` to the ngrok HTTPS URL.
+
 ## Prompt Files
 
 Edit prompt files directly:
@@ -323,6 +371,15 @@ SUPABASE_URL=             # For cloud memory persistence
 SUPABASE_ANON_KEY=        # For cloud memory persistence
 GEMINI_API_KEY=           # For voice transcription
 ELEVENLABS_API_KEY=       # For voice responses
+
+# Optional - Telnyx + ElevenLabs phone-call relay
+VOICE_RELAY_HOST=0.0.0.0
+VOICE_RELAY_PORT=8787
+VOICE_RELAY_PUBLIC_BASE_URL=      # Public HTTPS URL for Telnyx webhooks
+VOICE_RELAY_AUTH_TOKEN=           # Optional bearer token for outbound API
+TELNYX_API_KEY=
+TELNYX_CONNECTION_ID=
+TELNYX_FROM_NUMBER=+1...
 ```
 
 ## FAQ

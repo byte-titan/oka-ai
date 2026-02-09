@@ -11,6 +11,7 @@ import { Bot, Context } from "grammy";
 import { spawn } from "bun";
 import { writeFile, mkdir, readFile, unlink, appendFile, access } from "fs/promises";
 import { dirname, isAbsolute, join } from "path";
+import { shouldEnableVoiceRelay, startVoiceRelay } from "./voice-relay";
 
 // ============================================================
 // CONFIGURATION
@@ -74,6 +75,7 @@ User: {{USER_MESSAGE}}
 `.trim();
 
 let promptLoadWarningShown = false;
+let voiceRelayServer: Bun.Server | null = null;
 
 // ============================================================
 // SESSION MANAGEMENT
@@ -134,10 +136,12 @@ process.on("exit", () => {
   } catch {}
 });
 process.on("SIGINT", async () => {
+  voiceRelayServer?.stop(true);
   await releaseLock();
   process.exit(0);
 });
 process.on("SIGTERM", async () => {
+  voiceRelayServer?.stop(true);
   await releaseLock();
   process.exit(0);
 });
@@ -758,6 +762,16 @@ console.log(
     CODEX_FULL_ACCESS ? "full access (approvals + sandbox bypassed)" : `sandbox=${CODEX_SANDBOX}`
   }`
 );
+
+if (shouldEnableVoiceRelay()) {
+  try {
+    voiceRelayServer = startVoiceRelay("[main]");
+  } catch (error) {
+    console.error("Voice relay failed to start:", error);
+  }
+} else {
+  console.log("Voice relay: disabled (set VOICE_RELAY_ENABLED=true to force-enable)");
+}
 
 bot.start({
   onStart: () => {
