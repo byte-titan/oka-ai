@@ -4,7 +4,7 @@
 - `src/`: Runtime entrypoints.
 - `src/relay.ts`: Main Telegram relay process.
 - `src/voice-relay.ts`: Voice/Telnyx flow and outbound call support.
-- `examples/`: Optional automation patterns (for example `smart-checkin.ts`, `memory.ts`).
+- `examples/`: Optional automation patterns (for example `morning-briefing.ts`, `memory.ts`).
 - `defaults/workspace/`: Seed files copied into `~/.oka` or local `.oka` during setup.
 - `daemon/`: Service templates for always-on deployment (`launchagent.plist`, `codex-relay.service`).
 - `scripts/setup.sh`: Bootstraps workspace defaults and local prerequisites.

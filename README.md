@@ -112,9 +112,10 @@ Then set `VOICE_RELAY_PUBLIC_BASE_URL` to the ngrok HTTPS URL.
 
 Edit prompt files directly:
 - Main chat prompt:
-  default: `~/.oka/AGENTS.md`
-  local dev (`bun run dev`): `./.oka/AGENTS.md`
-- Cron heartbeat prompt (used by `examples/smart-checkin.ts`):
+  default (preferred): `~/.oka/OKA.md`
+  fallback/backward-compatible: `~/.oka/AGENTS.md`
+  local dev (`bun run dev`): `./.oka/OKA.md` (or `./.oka/AGENTS.md`)
+- Heartbeat prompt (used by relay's built-in scheduler):
   default: `~/.oka/HEARTBEAT.md`
   local dev with `OKA_WORKSPACE_DIR=.oka`: `./.oka/HEARTBEAT.md`
 
@@ -224,7 +225,6 @@ src/
 
 examples/
   morning-briefing.ts   # Scheduled daily summary
-  smart-checkin.ts      # Proactive check-ins
   memory.ts             # Persistent memory pattern
   supabase-schema.sql   # Optional: cloud persistence
 
@@ -332,12 +332,12 @@ Sends a daily summary at a scheduled time:
 
 Schedule it with cron (Linux), launchd (Mac), or Task Scheduler (Windows).
 
-### Smart Check-in (`examples/smart-checkin.ts`)
+### Heartbeat Scheduler (built into relay)
 
-Proactive assistant that checks in based on context:
-- Time since last message
-- Pending goals with deadlines
-- Calendar events coming up
+The relay process runs periodic heartbeat checks in-process (no external cron/task required):
+- Controlled by `HEARTBEAT_ENABLED` (default `true`)
+- Interval set by `HEARTBEAT_INTERVAL_MINUTES` (default `30`)
+- Optional startup run with `HEARTBEAT_RUN_ON_START` (default `true`)
 
 Codex decides IF and WHAT to say.
 Prompt source: `~/.oka/HEARTBEAT.md` (override with `HEARTBEAT_FILE`).
@@ -365,9 +365,12 @@ CODEX_MODEL=                          # Optional model override
 
 # Optional - Workspace + prompt
 OKA_WORKSPACE_DIR=~/.oka              # Workspace root for temp/uploads/session/config
-AGENTS_FILE=~/.oka/AGENTS.md          # Main relay prompt file
-HEARTBEAT_FILE=~/.oka/HEARTBEAT.md    # Cron heartbeat prompt (smart-checkin)
-PROMPT_FILE=~/.oka/AGENTS.md          # Backward-compatible alias for AGENTS_FILE
+AGENTS_FILE=~/.oka/OKA.md             # Main relay prompt file (preferred)
+HEARTBEAT_FILE=~/.oka/HEARTBEAT.md    # Heartbeat prompt used by built-in scheduler
+HEARTBEAT_ENABLED=true                # Built-in heartbeat scheduler enabled
+HEARTBEAT_INTERVAL_MINUTES=30         # Run heartbeat every X minutes
+HEARTBEAT_RUN_ON_START=true           # Run one heartbeat check on relay start
+PROMPT_FILE=~/.oka/OKA.md             # Backward-compatible alias for AGENTS_FILE
 RELAY_DIR=~/.oka                      # Backward-compatible alias for OKA_WORKSPACE_DIR
 
 # Optional - Features
