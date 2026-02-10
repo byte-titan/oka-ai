@@ -1,14 +1,13 @@
 /**
  * Codex Telegram Relay
  *
- * Minimal relay that connects Telegram to Codex CLI.
+ * Minimal relay that connects Telegram to a configured LLM backend.
  * Customize this for your own needs.
  *
  * Run: bun run src/relay.ts
  */
 
 import { Bot, Context } from "grammy";
-import { spawn } from "bun";
 import { randomUUID } from "crypto";
 import { existsSync } from "fs";
 import {
@@ -26,7 +25,7 @@ import {
     getHeartbeatSchedulerConfig,
     startHeartbeatScheduler,
 } from "./heartbeat";
-import { parseCodexJsonStream } from "./utils/codex-events";
+import { callLlm, getLlmLogConfig, getLlmProvider } from "./llm";
 import { resolvePath } from "./utils/path";
 import {
     splitTelegramChunks,
@@ -40,7 +39,6 @@ import {
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const ALLOWED_USER_ID = process.env.TELEGRAM_USER_ID || "";
-const CODEX_PATH = process.env.CODEX_PATH || process.env.CLAUDE_PATH || "codex";
 const WORKSPACE_DIR = resolvePath(
     process.env.OKA_WORKSPACE_DIR ||
         process.env.RELAY_DIR ||
@@ -60,11 +58,6 @@ const AGENTS_FILE = AGENTS_FILE_ENV
     : existsSync(DEFAULT_OKA_FILE)
       ? DEFAULT_OKA_FILE
       : DEFAULT_AGENTS_FILE;
-const CODEX_REASONING_EFFORT = process.env.CODEX_REASONING_EFFORT || "low";
-const CODEX_MODEL = process.env.CODEX_MODEL || "";
-const CODEX_FULL_ACCESS =
-    (process.env.CODEX_FULL_ACCESS || "true").toLowerCase() === "true";
-const CODEX_SANDBOX = process.env.CODEX_SANDBOX || "danger-full-access";
 const WHISPER_CLI_PATH = resolvePath(
     process.env.WHISPER_CLI_PATH ||
         join(process.cwd(), "tools/whisper.cpp/build/bin/whisper-cli"),
@@ -256,99 +249,60 @@ bot.use(async (ctx, next) => {
 });
 
 // ============================================================
-// CORE: Call Codex CLI
+// CORE: Call configured LLM provider
 // ============================================================
 
-async function callCodex(
+async function callModel(
     prompt: string,
     options?: { resume?: boolean },
 ): Promise<string> {
-    const args = buildCodexCommand(prompt, options);
+    const provider = getLlmProvider();
+    const resumeSessionId =
+        provider === "codex-cli" && options?.resume ? session.sessionId : null;
 
-    console.log(`Calling Codex: ${prompt.substring(0, 50)}...`);
+    console.log(
+        `Calling ${provider}: ${prompt.substring(0, 50).replace(/\s+/g, " ")}...`,
+    );
+    console.log(`Prompt size: ${prompt.length} chars`);
 
     try {
-        const proc = spawn(args, {
-            stdout: "pipe",
-            stderr: "pipe",
-            env: {
-                ...process.env,
-                // Pass through any env vars Codex might need
-            },
-        });
-
-        const output = await new Response(proc.stdout).text();
-        const stderr = await new Response(proc.stderr).text();
-
-        const exitCode = await proc.exited;
-
-        if (exitCode !== 0) {
-            console.error("Codex error:", stderr);
-            return `Error: ${stderr || "Codex exited with code " + exitCode}`;
-        }
-
-        const parsed = parseCodexOutput(output);
-        if (parsed.sessionId) {
-            session.sessionId = parsed.sessionId;
+        const result = await callLlm(prompt, { resumeSessionId });
+        if (result.sessionId) {
+            session.sessionId = result.sessionId;
             session.lastActivity = new Date().toISOString();
             await saveSession(session);
         }
 
-        if (!parsed.response) {
-            return "No response from Codex.";
+        if (!result.response) {
+            return "No response from model.";
         }
 
-        return parsed.response;
+        return result.response;
     } catch (error) {
-        console.error("Spawn error:", error);
-        return `Error: Could not run Codex CLI`;
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("Model call error:", error);
+        return `Error: ${message || "Could not run configured LLM provider."}`;
     }
 }
 
-function buildCodexCommand(
-    prompt: string,
-    options?: { resume?: boolean },
-): string[] {
-    const args = [CODEX_PATH];
-
-    if (CODEX_FULL_ACCESS) {
-        args.push("--dangerously-bypass-approvals-and-sandbox");
-    } else {
-        args.push("-s", CODEX_SANDBOX);
-    }
-
-    args.push(
-        "exec",
-        "--json",
-        "-c",
-        `model_reasoning_effort="${CODEX_REASONING_EFFORT}"`,
+function logBotDecision(
+    source: string,
+    response: BotResponseEnvelope,
+): void {
+    console.log(
+        `[bot:${source}] text chars=${response.text_response.length} commands=${response.commands_executed.length} todos=${response.todos.length} potential_skill=${response.potential_skill ? "yes" : "no"}`,
     );
 
-    if (CODEX_MODEL) {
-        args.push("--model", CODEX_MODEL);
+    if (response.commands_executed.length > 0) {
+        console.log(
+            `[bot:${source}] commands: ${response.commands_executed.join(" | ")}`,
+        );
     }
 
-    if (options?.resume && session.sessionId) {
-        args.push("resume", session.sessionId, prompt);
-    } else {
-        args.push(prompt);
+    if (response.todos.length > 0) {
+        const titles = response.todos.map((todo) => todo.title);
+        console.log(`[bot:${source}] todos: ${titles.join(" | ")}`);
     }
-
-    return args;
-}
-
-function parseCodexOutput(output: string): {
-    response: string;
-    sessionId: string | null;
-} {
-    const { messages, sessionId } = parseCodexJsonStream(output, {
-        includePlainText: true,
-    });
-
-    return {
-        response: messages.join("\n\n").trim(),
-        sessionId,
-    };
 }
 
 // ============================================================
@@ -367,8 +321,9 @@ bot.on("message:text", async (ctx) => {
         text,
         requestStartedAt.toISOString(),
     );
-    const rawResponse = await callCodex(enrichedPrompt, { resume: true });
+    const rawResponse = await callModel(enrichedPrompt, { resume: true });
     const botResponse = parseBotResponse(rawResponse, requestStartedAt, text);
+    logBotDecision("text", botResponse);
 
     await appendMemoryRecord({
         timestamp: new Date().toISOString(),
@@ -418,12 +373,13 @@ bot.on("message:voice", async (ctx) => {
             `[Voice transcription]\n${transcription}`,
             requestStartedAt.toISOString(),
         );
-        const rawResponse = await callCodex(prompt, { resume: true });
+        const rawResponse = await callModel(prompt, { resume: true });
         const botResponse = parseBotResponse(
             rawResponse,
             requestStartedAt,
             transcription,
         );
+        logBotDecision("voice", botResponse);
 
         await appendMemoryRecord({
             timestamp: new Date().toISOString(),
@@ -483,8 +439,9 @@ bot.on("message:photo", async (ctx) => {
             requestStartedAt.toISOString(),
         );
 
-        const rawResponse = await callCodex(prompt, { resume: true });
+        const rawResponse = await callModel(prompt, { resume: true });
         const botResponse = parseBotResponse(rawResponse, requestStartedAt, caption);
+        logBotDecision("photo", botResponse);
 
         await appendMemoryRecord({
             timestamp: new Date().toISOString(),
@@ -536,12 +493,13 @@ bot.on("message:document", async (ctx) => {
             requestStartedAt.toISOString(),
         );
 
-        const rawResponse = await callCodex(prompt, { resume: true });
+        const rawResponse = await callModel(prompt, { resume: true });
         const botResponse = parseBotResponse(
             rawResponse,
             requestStartedAt,
             caption,
         );
+        logBotDecision("document", botResponse);
 
         await appendMemoryRecord({
             timestamp: new Date().toISOString(),
@@ -706,7 +664,7 @@ function parseBotResponse(
     userMessage: string,
 ): BotResponseEnvelope {
     const now = new Date();
-    const fallbackText = raw.trim() || "No response from Codex.";
+    const fallbackText = raw.trim() || "No response from model.";
     const extracted = extractJsonObject(raw);
     const parsed = extracted ? safeJsonParse(extracted) : safeJsonParse(raw);
     const durationMs = Math.max(0, now.getTime() - requestStartedAt.getTime());
@@ -1138,11 +1096,16 @@ async function loadRecentMemoryContext(timezone: string): Promise<string> {
 
 async function sendResponse(ctx: Context, response: string): Promise<void> {
     if (response.length <= TELEGRAM_MAX_MESSAGE_LENGTH) {
+        console.log(`[telegram] sending single message chars=${response.length}`);
         await replyTelegram(ctx, response);
         return;
     }
 
-    for (const chunk of splitTelegramChunks(response)) {
+    const chunks = splitTelegramChunks(response);
+    console.log(
+        `[telegram] sending ${chunks.length} chunks totalChars=${response.length}`,
+    );
+    for (const chunk of chunks) {
         await replyTelegram(ctx, chunk);
     }
 }
@@ -1182,18 +1145,11 @@ async function replyTelegram(ctx: Context, text: string): Promise<void> {
 // START
 // ============================================================
 
-console.log("Starting Codex Telegram Relay...");
+console.log("Starting Telegram Relay...");
 console.log(`Authorized user: ${ALLOWED_USER_ID || "ANY (not recommended)"}`);
 console.log(`Workspace: ${WORKSPACE_DIR}`);
 console.log(`Prompt file: ${AGENTS_FILE}`);
-console.log(`Reasoning effort: ${CODEX_REASONING_EFFORT}`);
-console.log(
-    `Access mode: ${
-        CODEX_FULL_ACCESS
-            ? "full access (approvals + sandbox bypassed)"
-            : `sandbox=${CODEX_SANDBOX}`
-    }`,
-);
+console.log(`LLM config: ${getLlmLogConfig()}`);
 
 if (shouldEnableVoiceRelay()) {
     try {

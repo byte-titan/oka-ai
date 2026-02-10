@@ -1,12 +1,14 @@
 # Codex Telegram Relay
 
-**A pattern for running Codex as an always-on Telegram bot.**
+**A pattern for running Codex CLI or any OpenAI-compatible LLM as an always-on Telegram bot.**
 
 > **This is a reference implementation, not a copy-paste solution.** Take the patterns here and build your own system tailored to your needs.
 
 ## What This Is
 
-A minimal relay that connects Telegram to Codex CLI. You send a message on Telegram, the relay spawns `codex exec`, and sends the response back.
+A minimal relay that connects Telegram to either:
+- Codex CLI (`codex exec`)
+- Any OpenAI-compatible API (for example Ollama)
 
 ```
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
@@ -28,7 +30,9 @@ The CLI spawn approach is the simplest way to get Codex tool use (shell, files, 
 ## Requirements
 
 - [Bun](https://bun.sh/) runtime (or Node.js 18+)
-- Codex CLI installed and authenticated (`codex` command available in `PATH`)
+- Either:
+  - Codex CLI installed and authenticated (`codex` command available in `PATH`)
+  - Or an OpenAI-compatible endpoint (for example local Ollama)
 - Telegram Bot Token (from [@BotFather](https://t.me/BotFather))
 - Your Telegram User ID (from [@userinfobot](https://t.me/userinfobot))
 
@@ -339,7 +343,7 @@ The relay process runs periodic heartbeat checks in-process (no external cron/ta
 - Interval set by `HEARTBEAT_INTERVAL_MINUTES` (default `30`)
 - Optional startup run with `HEARTBEAT_RUN_ON_START` (default `true`)
 
-Codex decides IF and WHAT to say.
+The configured LLM decides IF and WHAT to say.
 Prompt source: `~/.oka/HEARTBEAT.md` (override with `HEARTBEAT_FILE`).
 
 ### Memory Persistence (`examples/memory.ts`)
@@ -362,6 +366,13 @@ CODEX_REASONING_EFFORT=low            # low | medium | high
 CODEX_FULL_ACCESS=true                # true => bypass sandbox + approvals
 CODEX_SANDBOX=danger-full-access      # Used only when CODEX_FULL_ACCESS=false
 CODEX_MODEL=                          # Optional model override
+
+# Optional - OpenAI-compatible runtime (Ollama/OpenRouter/LM Studio/vLLM)
+LLM_PROVIDER=openai-compatible        # codex-cli | openai-compatible
+LLM_BASE_URL=http://localhost:11434   # "/v1" auto-appended if omitted
+LLM_MODEL=llama3.2                    # Model for /v1/chat/completions
+LLM_API_KEY=                          # Optional for local Ollama
+LLM_LOG_VERBOSE=true                  # Optional explicit verbose logs
 
 # Optional - Workspace + prompt
 OKA_WORKSPACE_DIR=~/.oka              # Workspace root for temp/uploads/session/config
@@ -394,6 +405,10 @@ TELNYX_FROM_NUMBER=+1...
 **Q: Why spawn CLI instead of using the API directly?**
 
 The CLI gives you everything: tools, MCP servers, context management, and command execution. The API is just the model.
+
+**Q: Can I use Ollama or another OpenAI-compatible endpoint?**
+
+Yes. Set `LLM_PROVIDER=openai-compatible` plus `LLM_BASE_URL` and `LLM_MODEL`. Example: `LLM_BASE_URL=http://localhost:11434` with Ollama.
 
 **Q: Isn't spawning a process slow?**
 

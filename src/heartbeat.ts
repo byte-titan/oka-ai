@@ -1,7 +1,6 @@
-import { spawn } from "bun";
 import { readFile } from "fs/promises";
 import { join } from "path";
-import { parseCodexJsonStream } from "./utils/codex-events";
+import { callLlm, getLlmProvider } from "./llm";
 import { resolvePath } from "./utils/path";
 import { sendChunkedTelegramWithFallback } from "./utils/telegram";
 
@@ -13,7 +12,6 @@ export interface HeartbeatSchedulerOptions {
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const CHAT_ID = process.env.TELEGRAM_USER_ID || "";
-const CODEX_PATH = process.env.CODEX_PATH || "codex";
 const WORKSPACE_DIR = resolvePath(
   process.env.OKA_WORKSPACE_DIR || join(process.env.HOME || "~", ".oka")
 );
@@ -101,7 +99,7 @@ export async function runHeartbeatOnce(): Promise<void> {
     return;
   }
 
-  const { shouldCheckin, message } = await askCodexToDecide();
+  const { shouldCheckin, message } = await askModelToDecide();
 
   if (!shouldCheckin || !message || message.toLowerCase() === "none") {
     console.log("Heartbeat: no check-in needed");
@@ -117,28 +115,12 @@ export async function runHeartbeatOnce(): Promise<void> {
   console.log("Heartbeat: check-in sent");
 }
 
-async function askCodexToDecide(): Promise<{ shouldCheckin: boolean; message: string }> {
+async function askModelToDecide(): Promise<{ shouldCheckin: boolean; message: string }> {
   const prompt = await buildHeartbeatPrompt();
 
   try {
-    const proc = spawn(
-      [
-        CODEX_PATH,
-        "--dangerously-bypass-approvals-and-sandbox",
-        "exec",
-        "--json",
-        "-c",
-        'model_reasoning_effort="low"',
-        prompt,
-      ],
-      {
-        stdout: "pipe",
-        stderr: "pipe",
-      }
-    );
-
-    const output = await new Response(proc.stdout).text();
-    const text = extractAgentMessage(output);
+    const result = await callLlm(prompt);
+    const text = result.response;
 
     const decisionMatch = text.match(/DECISION:\s*(YES|NO)/i);
     const messageMatch = text.match(/MESSAGE:\s*(.+?)(?=\nREASON:|$)/is);
@@ -148,21 +130,16 @@ async function askCodexToDecide(): Promise<{ shouldCheckin: boolean; message: st
     const message = messageMatch?.[1]?.trim() || "";
     const reason = reasonMatch?.[1]?.trim() || "";
 
-    console.log(`Heartbeat decision: ${shouldCheckin ? "YES" : "NO"}`);
+    console.log(`Heartbeat decision (${getLlmProvider()}): ${shouldCheckin ? "YES" : "NO"}`);
     if (reason) {
       console.log(`Heartbeat reason: ${reason}`);
     }
 
     return { shouldCheckin, message };
   } catch (error) {
-    console.error("Heartbeat Codex error:", error);
+    console.error("Heartbeat model error:", error);
     return { shouldCheckin: false, message: "" };
   }
-}
-
-function extractAgentMessage(output: string): string {
-  const parsed = parseCodexJsonStream(output);
-  return parsed.messages.join("\n");
 }
 
 async function buildHeartbeatPrompt(): Promise<string> {
