@@ -97,6 +97,7 @@ interface SessionState {
 
 interface BotResponseEnvelope {
     text_response: string;
+    potential_skill: PotentialSkill | null;
     commands_executed: string[];
     request_started_at: string;
     request_duration_ms: number;
@@ -112,6 +113,13 @@ interface TodoItem {
     due_until: string | null;
     reminder: string | null;
     notes: string | null;
+}
+
+interface PotentialSkill {
+    id: string;
+    name: string;
+    description: string;
+    details: string;
 }
 
 interface MemoryRecord {
@@ -360,7 +368,7 @@ bot.on("message:text", async (ctx) => {
         requestStartedAt.toISOString(),
     );
     const rawResponse = await callCodex(enrichedPrompt, { resume: true });
-    const botResponse = parseBotResponse(rawResponse, requestStartedAt);
+    const botResponse = parseBotResponse(rawResponse, requestStartedAt, text);
 
     await appendMemoryRecord({
         timestamp: new Date().toISOString(),
@@ -411,7 +419,11 @@ bot.on("message:voice", async (ctx) => {
             requestStartedAt.toISOString(),
         );
         const rawResponse = await callCodex(prompt, { resume: true });
-        const botResponse = parseBotResponse(rawResponse, requestStartedAt);
+        const botResponse = parseBotResponse(
+            rawResponse,
+            requestStartedAt,
+            transcription,
+        );
 
         await appendMemoryRecord({
             timestamp: new Date().toISOString(),
@@ -472,7 +484,7 @@ bot.on("message:photo", async (ctx) => {
         );
 
         const rawResponse = await callCodex(prompt, { resume: true });
-        const botResponse = parseBotResponse(rawResponse, requestStartedAt);
+        const botResponse = parseBotResponse(rawResponse, requestStartedAt, caption);
 
         await appendMemoryRecord({
             timestamp: new Date().toISOString(),
@@ -525,7 +537,11 @@ bot.on("message:document", async (ctx) => {
         );
 
         const rawResponse = await callCodex(prompt, { resume: true });
-        const botResponse = parseBotResponse(rawResponse, requestStartedAt);
+        const botResponse = parseBotResponse(
+            rawResponse,
+            requestStartedAt,
+            caption,
+        );
 
         await appendMemoryRecord({
             timestamp: new Date().toISOString(),
@@ -624,12 +640,26 @@ function getStructuredOutputContract(): string {
     return [
         "Output contract:",
         "- Return exactly one JSON object, no markdown fences and no extra text.",
-        '- Required keys: "text_response", "commands_executed", "request_started_at", "request_duration_ms", "collected_user_facts", "learnings", "todos".',
+        '- Required keys: "text_response", "potential_skill", "commands_executed", "request_started_at", "request_duration_ms", "collected_user_facts", "learnings", "todos".',
         '- "text_response": string for Telegram user.',
+        '- "potential_skill": object or null. Schema: {"id": string(uuid), "name": string, "description": string, "details": string}. Use null when no reusable skill is identified.',
+        '- "potential_skill.id": required UUID when potential_skill is present.',
+        '- "potential_skill.name": short reusable skill name.',
+        '- "potential_skill.description": one-line summary of what the skill does.',
+        '- "potential_skill.details": concise procedural guidance another LLM can reuse.',
+        '- Create "potential_skill" when the task pattern is likely reusable in future requests (for example repeatable lookups, transformations, multi-step routines, or tool workflows).',
+        '- Set "potential_skill" to null for one-off, non-reusable, or purely conversational requests.',
+        '- Before creating a new potential_skill, check the recent memory context for a matching skill and reuse/adapt it when applicable.',
+        '- If a fitting skill already exists in memory, use it and skip creating a new potential_skill.',
+        '- Do not output duplicate potential_skill entries that repeat an existing memory skill.',
+        '- Example reusable case: weather lookup request -> include a weather-fetching skill with clear steps and constraints.',
         '- "commands_executed": array of strings, empty when no commands were run.',
         '- "request_started_at": copy the provided request start timestamp exactly.',
         '- "request_duration_ms": integer duration from request start until this response is ready.',
-        '- "collected_user_facts": array of factual sentence strings learned about the user.',
+        '- "collected_user_facts": array of grounded factual sentence strings about the user from this discussion.',
+        '- Include only facts directly stated by the user or strongly implied by their message. Examples: "my wife and me" -> "The user has a wife."; "my dog" -> "The user has a dog."; "I am so sorry for my friend" -> "The user has friends." and "The user is compassionate."',
+        '- Do not include request-echo facts such as "The user requested tomorrow\'s weather for XYZ."',
+        '- Do not add speculative, weak, or unrelated inferences.',
         '- "learnings": array of future-useful lessons written as guidance for next time, ideally in "avoid X, do Y instead" form. Example: "Avoid calling cat for large logs; use tail -n 200 instead." If no meaningful learning occurred, return an empty array.',
         '- "todos": array of objects. Each todo object schema: {"id": string(uuid), "title": string, "priority": "low"|"medium"|"high", "due_until": string|null, "reminder": string|null, "notes": string|null}.',
         '- "todos.id": required UUID for this todo. Generate a new UUID when creating a todo.',
@@ -673,6 +703,7 @@ function getTimeStamp(timezone: string): string {
 function parseBotResponse(
     raw: string,
     requestStartedAt: Date,
+    userMessage: string,
 ): BotResponseEnvelope {
     const now = new Date();
     const fallbackText = raw.trim() || "No response from Codex.";
@@ -683,6 +714,7 @@ function parseBotResponse(
 
     const base: BotResponseEnvelope = {
         text_response: fallbackText,
+        potential_skill: null,
         commands_executed: [],
         request_started_at: startedAtIso,
         request_duration_ms: durationMs,
@@ -696,15 +728,18 @@ function parseBotResponse(
     }
 
     const obj = parsed as Record<string, unknown>;
-    return {
+    const response: BotResponseEnvelope = {
         text_response: asString(obj.text_response, base.text_response),
+        potential_skill: asPotentialSkill(obj.potential_skill),
         commands_executed: asStringArray(obj.commands_executed),
         request_started_at: startedAtIso,
         request_duration_ms: durationMs,
-        collected_user_facts: asStringArray(obj.collected_user_facts),
+        collected_user_facts: asCollectedUserFacts(obj.collected_user_facts),
         learnings: asStringArray(obj.learnings),
         todos: asTodoArray(obj.todos),
     };
+
+    return ensureCancellationCleanupTodo(response, userMessage);
 }
 
 function extractJsonObject(text: string): string | null {
@@ -732,6 +767,25 @@ function asString(value: unknown, fallback = ""): string {
 function asStringArray(value: unknown): string[] {
     if (!Array.isArray(value)) return [];
     return value.filter((item): item is string => typeof item === "string");
+}
+
+function asCollectedUserFacts(value: unknown): string[] {
+    const facts = asStringArray(value)
+        .map((fact) => fact.trim())
+        .filter(Boolean);
+
+    const filtered = facts.filter((fact) => {
+        const normalized = fact.toLowerCase();
+        return !(
+            normalized.includes("user requested") ||
+            normalized.includes("user asked") ||
+            normalized.includes("wants weather") ||
+            normalized.includes("requested weather") ||
+            normalized.includes("asked for weather")
+        );
+    });
+
+    return Array.from(new Set(filtered));
 }
 
 function asTodoArray(value: unknown): TodoItem[] {
@@ -780,6 +834,66 @@ function asUuid(value: unknown): string | null {
     )
         ? trimmed
         : null;
+}
+
+function asPotentialSkill(value: unknown): PotentialSkill | null {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const skill = value as Record<string, unknown>;
+    const name = asString(skill.name).trim();
+    const description = asString(skill.description).trim();
+    const details = asString(skill.details).trim();
+    if (!name || !description || !details) return null;
+
+    return {
+        id: asUuid(skill.id) ?? randomUUID(),
+        name,
+        description,
+        details,
+    };
+}
+
+function ensureCancellationCleanupTodo(
+    response: BotResponseEnvelope,
+    userMessage: string,
+): BotResponseEnvelope {
+    const normalized = userMessage.toLowerCase();
+    const hasCancelIntent =
+        /\bcancel(?:led|ed|ing)?\b/.test(normalized) ||
+        /\bcalled off\b/.test(normalized) ||
+        /\bnot going\b/.test(normalized);
+    const referencesTripPlan =
+        /\btrip\b/.test(normalized) ||
+        /\btravel\b/.test(normalized) ||
+        /\bvacation\b/.test(normalized) ||
+        /\bplan(?:s)?\b/.test(normalized);
+
+    if (!hasCancelIntent || !referencesTripPlan) {
+        return response;
+    }
+
+    const hasCleanupTodo = response.todos.some((todo) => {
+        const title = todo.title.toLowerCase();
+        return /\bcancel\b/.test(title) && (/\btrip\b/.test(title) || /\bplan/.test(title));
+    });
+
+    if (hasCleanupTodo) {
+        return response;
+    }
+
+    return {
+        ...response,
+        todos: [
+            ...response.todos,
+            {
+                id: randomUUID(),
+                title: "Cancel existing trip plan todos if present",
+                priority: "high",
+                due_until: null,
+                reminder: null,
+                notes: "User indicated the trip plans were cancelled. Clear any prior trip planning tasks.",
+            },
+        ],
+    };
 }
 
 async function appendMemoryRecord(record: MemoryRecord): Promise<void> {
